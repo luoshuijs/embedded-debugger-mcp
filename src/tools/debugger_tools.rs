@@ -4,16 +4,16 @@
 
 use rmcp::{
     tool, tool_handler, tool_router, ServerHandler,
-    handler::server::{router::tool::ToolRouter, tool::Parameters},
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     ErrorData as McpError,
     service::RequestContext,
     RoleServer,
 };
 use tracing::{debug, error, info, warn};
-use std::future::Future;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 use super::types::*;
@@ -22,6 +22,7 @@ use crate::rtt::RttManager;
 
 // Probe-rs imports
 use probe_rs::probe::list::Lister;
+use probe_rs::probe::WireProtocol;
 use probe_rs::{Session, Permissions, CoreStatus, MemoryInterface, RegisterValue};
 
 /// Debug session information
@@ -42,6 +43,53 @@ pub struct EmbeddedDebuggerToolHandler {
     tool_router: ToolRouter<EmbeddedDebuggerToolHandler>,
     sessions: Arc<RwLock<HashMap<String, Arc<DebugSession>>>>,
     max_sessions: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectAttachMethod {
+    Normal,
+    UnderReset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConnectPlan {
+    speed_khz: u32,
+    attach_method: ConnectAttachMethod,
+    halt_after_connect: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RttAttachStrategy {
+    Elf,
+    Ram,
+    Exact(u64),
+}
+
+fn build_connect_plan(args: &ConnectArgs) -> ConnectPlan {
+    ConnectPlan {
+        speed_khz: args.speed_khz,
+        attach_method: if args.connect_under_reset {
+            ConnectAttachMethod::UnderReset
+        } else {
+            ConnectAttachMethod::Normal
+        },
+        halt_after_connect: args.halt_after_connect,
+    }
+}
+
+fn build_rtt_attach_plan(timeout_ms: u32) -> Vec<(u64, RttAttachStrategy)> {
+    let steps = [
+        (0, RttAttachStrategy::Elf),
+        (200, RttAttachStrategy::Elf),
+        (400, RttAttachStrategy::Ram),
+        (800, RttAttachStrategy::Ram),
+        (1200, RttAttachStrategy::Exact(0x2000_0000)),
+    ];
+
+    steps
+        .into_iter()
+        .filter(|(delay_ms, _)| *delay_ms <= timeout_ms as u64)
+        .collect()
 }
 
 impl EmbeddedDebuggerToolHandler {
@@ -99,6 +147,7 @@ impl EmbeddedDebuggerToolHandler {
     #[tool(description = "Connect to a debug probe and target chip")]
     async fn connect(&self, Parameters(args): Parameters<ConnectArgs>) -> Result<CallToolResult, McpError> {
         debug!("Connecting to probe '{}' and target '{}'", args.probe_selector, args.target_chip);
+        let connect_plan = build_connect_plan(&args);
         
         // Check session limit
         {
@@ -129,10 +178,42 @@ impl EmbeddedDebuggerToolHandler {
             Some(probe_info) => {
                 info!("Opening probe: {}", probe_info.identifier);
                 match probe_info.open() {
-                    Ok(probe) => {
+                    Ok(mut probe) => {
+                        if let Err(e) = probe.set_speed(connect_plan.speed_khz) {
+                            let error_msg = format!(
+                                "❌ Failed to set probe speed to {} kHz\n\nError: {}",
+                                connect_plan.speed_khz, e
+                            );
+                            return Err(McpError::internal_error(error_msg, None));
+                        }
+
+                        if matches!(probe.protocol(), Some(WireProtocol::Jtag)) {
+                            if let Err(e) = probe.select_protocol(WireProtocol::Swd) {
+                                warn!("Failed to switch probe protocol to SWD before attach: {}", e);
+                            }
+                        }
+
                         info!("Attaching to target: {}", args.target_chip);
-                        match probe.attach(&args.target_chip, Permissions::default()) {
-                            Ok(session) => {
+                        let attach_result = match connect_plan.attach_method {
+                            ConnectAttachMethod::Normal => probe.attach(&args.target_chip, Permissions::default()),
+                            ConnectAttachMethod::UnderReset => probe.attach_under_reset(&args.target_chip, Permissions::default()),
+                        };
+
+                        match attach_result {
+                            Ok(mut session) => {
+                                if connect_plan.halt_after_connect {
+                                    if let Err(e) = session
+                                        .core(0)
+                                        .and_then(|mut core| core.halt(Duration::from_millis(100)))
+                                    {
+                                        let error_msg = format!(
+                                            "❌ Connected to target but failed to halt core\n\nError: {}",
+                                            e
+                                        );
+                                        return Err(McpError::internal_error(error_msg, None));
+                                    }
+                                }
+
                                 let session_id = format!("session_{}", chrono::Utc::now().timestamp_millis());
                                 
                                 let debug_session = DebugSession {
@@ -185,13 +266,10 @@ impl EmbeddedDebuggerToolHandler {
                     }
                     Err(e) => {
                         error!("Failed to open probe '{}': {}", probe_info.identifier, e);
-                        let error_msg = format!(
-                            "❌ Failed to open probe '{}'\n\nError: {}\n\n\
-                            Suggestions:\n\
-                            - Check probe drivers installation\n\
-                            - Verify USB connection\n\
-                            - Try disconnecting and reconnecting probe",
-                            probe_info.identifier, e
+                        let error_msg = format_probe_open_error_message(
+                            &probe_info.identifier,
+                            &e.to_string(),
+                            cfg!(windows),
                         );
                         Err(McpError::internal_error(error_msg, None))
                     }
@@ -865,8 +943,8 @@ impl EmbeddedDebuggerToolHandler {
         };
 
         // Parse control block address if provided
-        let control_block_address = if let Some(addr_str) = args.control_block_address {
-            match parse_address(&addr_str) {
+        let control_block_address = if let Some(addr_str) = args.control_block_address.as_deref() {
+            match parse_address(addr_str) {
                 Ok(addr) => Some(addr),
                 Err(e) => {
                     let error_msg = format!("❌ Invalid control block address '{}': {}", addr_str, e);
@@ -1080,7 +1158,7 @@ impl EmbeddedDebuggerToolHandler {
                 
                 let mut bytes = Vec::new();
                 for chunk in binary_str.chars().collect::<Vec<_>>().chunks(8) {
-                    let byte_str: String = chunk.iter().collect();
+                    let byte_str: String = chunk.iter().copied().collect();
                     match u8::from_str_radix(&byte_str, 2) {
                         Ok(byte) => bytes.push(byte),
                         Err(e) => {
@@ -1233,8 +1311,8 @@ impl EmbeddedDebuggerToolHandler {
         let erase_type = match args.erase_type.as_str() {
             "all" => crate::flash::EraseType::All,
             "sectors" => {
-                let address = match args.address {
-                    Some(addr_str) => parse_address(&addr_str).map_err(|e| McpError::internal_error(e, None))?,
+                let address = match args.address.as_deref() {
+                    Some(addr_str) => parse_address(addr_str).map_err(|e| McpError::internal_error(e, None))?,
                     None => return Err(McpError::internal_error("Address required for sector erase".to_string(), None)),
                 };
                 let size = match args.size {
@@ -1314,8 +1392,8 @@ impl EmbeddedDebuggerToolHandler {
         };
 
         // Parse base address if provided
-        let base_address = if let Some(addr_str) = args.base_address {
-            Some(parse_address(&addr_str).map_err(|e| McpError::internal_error(e, None))?)
+        let base_address = if let Some(addr_str) = args.base_address.as_deref() {
+            Some(parse_address(addr_str).map_err(|e| McpError::internal_error(e, None))?)
         } else {
             None
         };
@@ -1323,7 +1401,7 @@ impl EmbeddedDebuggerToolHandler {
         // Perform programming operation
         {
             let mut session = session_arc.session.lock().await;
-            match crate::flash::FlashManager::program_file(&mut session, file_path, format, base_address).await {
+            match crate::flash::FlashManager::program_file(&mut session, file_path, format, base_address, args.verify).await {
                 Ok(result) => {
                     let message = format!(
                         "✅ Flash programming completed successfully!\n\n\
@@ -1510,7 +1588,7 @@ impl EmbeddedDebuggerToolHandler {
 
         {
             let mut session = session_arc.session.lock().await;
-            match crate::flash::FlashManager::program_file(&mut session, std::path::Path::new(&args.file_path), format, None).await {
+            match crate::flash::FlashManager::program_file(&mut session, std::path::Path::new(&args.file_path), format, None, true).await {
                 Ok(result) => status_messages.push(format!("✅ Programmed {} bytes", result.bytes_programmed)),
                 Err(e) => {
                     let error_msg = format!("❌ Programming failed: {}", e);
@@ -1550,58 +1628,39 @@ impl EmbeddedDebuggerToolHandler {
 
         // Step 4: Attach RTT (if requested) - Mimic probe-rs run behavior
         if args.attach_rtt {
-            status_messages.push("🔄 Step 4/5: Attaching RTT (probe-rs style)...".to_string());
-            
-            // Key improvement: Give target more time to boot, mimic probe-rs run timing
-            info!("Allowing target firmware to fully initialize RTT control block...");
-            tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await; // Initial 2s delay
-            
-            // Give target additional time to fully initialize RTT (key improvement)
-            info!("Giving target additional time to initialize RTT control block...");
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-            
-            // Enhanced RTT retry mechanism with probe-rs style timing
-            let mut rtt_attached = false;
-            let max_attempts = 8; // Increase retry attempts
-            let mut attempt = 1;
-            
-            while attempt <= max_attempts && !rtt_attached {
-                // probe-rs style delay strategy: 1s, 1.5s, 2s, 2.5s, 3s, 3.5s, 4s, 4.5s
-                let delay_ms = 1000 + (attempt - 1) * 500;
-                info!("RTT attach attempt {}/{}, waiting {}ms for RTT control block...", attempt, max_attempts, delay_ms);
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms as u64)).await;
-                
-                // Small delay between RTT attempts (let target stabilize)
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                
-                // Try RTT attachment with different strategies (probe-rs style optimization)
+            status_messages.push("🔄 Step 4/5: Attaching RTT...".to_string());
+
+            let rtt_plan = build_rtt_attach_plan(args.rtt_timeout_ms);
+            let rtt_attach_start = std::time::Instant::now();
+            for (attempt, (delay_ms, strategy)) in rtt_plan.iter().enumerate() {
+                let elapsed_ms = rtt_attach_start.elapsed().as_millis() as u64;
+                if *delay_ms > elapsed_ms {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(*delay_ms - elapsed_ms)).await;
+                }
+
+                let attempt_number = attempt + 1;
+                info!(
+                    "RTT attach attempt {}/{} using {:?} at {}ms (timeout {}ms)",
+                    attempt_number,
+                    rtt_plan.len(),
+                    strategy,
+                    delay_ms,
+                    args.rtt_timeout_ms
+                );
+
                 let mut rtt_manager = session_arc.rtt_manager.lock().await;
-                let rtt_result = match attempt {
-                    1..=2 => {
-                        // First 2 attempts: ELF symbol detection (probe-rs priority method)
-                        debug!("RTT attempt {}: Using ELF symbol detection (probe-rs style)", attempt);
+                let rtt_result = match strategy {
+                    RttAttachStrategy::Elf => {
+                        debug!("RTT attempt {}: Using ELF symbol detection", attempt_number);
                         rtt_manager.attach_with_elf(session_arc.session.clone(), std::path::Path::new(&args.file_path)).await
                     }
-                    3..=5 => {
-                        // Attempts 3-5: standard attach, let probe-rs auto-scan memory
-                        debug!("RTT attempt {}: Using standard memory map scan", attempt);
+                    RttAttachStrategy::Ram => {
+                        debug!("RTT attempt {}: Using RAM scan", attempt_number);
                         rtt_manager.attach(session_arc.session.clone(), None, None).await
                     }
-                    6..=7 => {
-                        // Attempts 6-7: try STM32G4 specific memory ranges
-                        debug!("RTT attempt {}: Using STM32G4 specific memory ranges", attempt);
-                        let stm32g4_ranges = vec![
-                            (0x20000000, 0x20004000), // SRAM1 first half: 16KB - most likely RTT location
-                            (0x20004000, 0x20008000), // SRAM1 second half: 16KB
-                            (0x20008000, 0x2000A000), // SRAM2: 8KB
-                        ];
-                        rtt_manager.attach(session_arc.session.clone(), None, Some(stm32g4_ranges)).await
-                    }
-                    _ => {
-                        // Last attempt: try common RTT control block addresses
-                        let cb_addr = 0x20000000;
-                        debug!("RTT attempt {}: Using specific control block address 0x{:08X}", attempt, cb_addr);
-                        rtt_manager.attach(session_arc.session.clone(), Some(cb_addr), None).await
+                    RttAttachStrategy::Exact(cb_addr) => {
+                        debug!("RTT attempt {}: Using control block address 0x{:08X}", attempt_number, cb_addr);
+                        rtt_manager.attach(session_arc.session.clone(), Some(*cb_addr), None).await
                     }
                 };
                 
@@ -1609,27 +1668,23 @@ impl EmbeddedDebuggerToolHandler {
                     Ok(_) => {
                         let up_channels = rtt_manager.up_channel_count();
                         let down_channels = rtt_manager.down_channel_count();
-                        status_messages.push(format!("✅ RTT attached on attempt {} ({} up, {} down channels)", attempt, up_channels, down_channels));
-                        info!("RTT successfully attached after {} attempts!", attempt);
-                        rtt_attached = true;
+                        status_messages.push(format!("✅ RTT attached on attempt {} ({} up, {} down channels)", attempt_number, up_channels, down_channels));
+                        info!("RTT successfully attached after {} attempts!", attempt_number);
+                        break;
                     }
                     Err(e) => {
-                        if attempt == max_attempts {
-                            // Final attempt failed
-                            status_messages.push(format!("⚠️ RTT attach failed after {} attempts: {}", max_attempts, e));
-                            warn!("RTT attachment failed completely after {} attempts", max_attempts);
+                        if attempt_number == rtt_plan.len() {
+                            status_messages.push(format!("⚠️ RTT attach failed within {}ms timeout: {}", args.rtt_timeout_ms, e));
+                            warn!("RTT attachment failed within configured timeout of {}ms", args.rtt_timeout_ms);
                         } else {
-                            debug!("RTT attach attempt {}/{} failed: {}, retrying with different strategy...", attempt, max_attempts, e);
+                            debug!("RTT attach attempt {}/{} failed: {}, retrying...", attempt_number, rtt_plan.len(), e);
                         }
                     }
                 }
-                attempt += 1;
             }
-            
-            // If RTT successfully connected, give extra initialization time
-            if rtt_attached {
-                info!("RTT connected successfully, allowing channel stabilization...");
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            if rtt_plan.is_empty() {
+                status_messages.push(format!("⚠️ RTT attach skipped because timeout {}ms is too small", args.rtt_timeout_ms));
             }
         }
 
@@ -1817,20 +1872,132 @@ fn format_memory_data(data: &[u8], format: &str, base_address: u64) -> String {
 #[tool_handler]
 impl ServerHandler for EmbeddedDebuggerToolHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some("Complete embedded debugging and flash programming MCP server supporting ARM Cortex-M, RISC-V, and other architectures via probe-rs. Provides comprehensive debugging and flash programming capabilities including probe detection, target connection, memory operations, breakpoints, RTT communication, and flash programming with real hardware integration. All 22 tools available: list_probes, connect, disconnect, probe_info, halt, run, reset, step, get_status, read_memory, write_memory, set_breakpoint, clear_breakpoint, rtt_attach, rtt_detach, rtt_read, rtt_write, rtt_channels, flash_erase, flash_program, flash_verify, run_firmware.".to_string()),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions("Complete embedded debugging and flash programming MCP server supporting ARM Cortex-M, RISC-V, and other architectures via probe-rs. Provides comprehensive debugging and flash programming capabilities including probe detection, target connection, memory operations, breakpoints, RTT communication, and flash programming with real hardware integration. All 22 tools available: list_probes, connect, disconnect, probe_info, halt, run, reset, step, get_status, read_memory, write_memory, set_breakpoint, clear_breakpoint, rtt_attach, rtt_detach, rtt_read, rtt_write, rtt_channels, flash_erase, flash_program, flash_verify, run_firmware.")
     }
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParam,
+        _request: InitializeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         info!("Complete Embedded Debugger MCP server initialized with all 22 tools (18 debug + 4 flash)");
         Ok(self.get_info())
+    }
+}
+
+fn format_probe_open_error_message(probe_identifier: &str, raw_error: &str, is_windows: bool) -> String {
+    let mut message = format!(
+        "❌ Failed to open probe '{}'\n\n\
+        Summary:\n\
+        Unable to open the debug probe.\n\n\
+        Underlying Error:\n\
+        {}",
+        probe_identifier, raw_error
+    );
+
+    let normalized_identifier = probe_identifier.to_ascii_lowercase();
+    let normalized_error = raw_error.to_ascii_lowercase();
+    let is_jlink = normalized_identifier.contains("j-link") || normalized_identifier.contains("jlink");
+    let mentions_winusb_guidance = normalized_error.contains("winusb") || normalized_error.contains("zadig");
+    let mentions_jlink_usb_open = normalized_error.contains("opening the usb device")
+        || normalized_error.contains("taking control over usb device");
+    let looks_like_winusb_issue = mentions_winusb_guidance || (mentions_jlink_usb_open && mentions_winusb_guidance);
+
+    if is_windows && is_jlink && looks_like_winusb_issue {
+        message.push_str(
+            "\n\nLikely Cause:\n\
+            On Windows, this often means the J-Link is not using WinUSB.\n\n\
+            Suggested Fix:\n\
+            - Use Zadig to install WinUSB for the J-Link device\n\
+            - Reconnect the probe and try again\n\
+            - Note: this replaces the SEGGER J-Link driver for that interface"
+        );
+    } else {
+        message.push_str(
+            "\n\nSuggested Fix:\n\
+            - Check probe drivers installation\n\
+            - Verify USB connection\n\
+            - Try disconnecting and reconnecting probe"
+        );
+    }
+
+    message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_jlink_windows_open_error_with_raw_error_and_driver_hint() {
+        let message = format_probe_open_error_message(
+            "J-Link Debug Probe",
+            "opening the USB device failed: access denied (this error may be caused by not having the WinUSB driver installed; use Zadig (https://zadig.akeo.ie/) to install it for the J-Link device; this will replace the SEGGER J-Link driver)",
+            true,
+        );
+
+        assert!(message.contains("❌ Failed to open probe 'J-Link Debug Probe'"));
+        assert!(message.contains("Underlying Error:"));
+        assert!(message.contains("opening the USB device failed: access denied"));
+        assert!(message.contains("Likely Cause:"));
+        assert!(message.contains("not using WinUSB"));
+        assert!(message.contains("Suggested Fix:"));
+        assert!(message.contains("Use Zadig to install WinUSB for the J-Link device"));
+        assert!(message.contains("this replaces the SEGGER J-Link driver"));
+    }
+
+    #[test]
+    fn keeps_generic_message_for_non_winusb_access_denied_errors() {
+        let message = format_probe_open_error_message(
+            "J-Link Debug Probe",
+            "opening the USB device failed: access denied",
+            true,
+        );
+
+        assert!(message.contains("Underlying Error:"));
+        assert!(message.contains("opening the USB device failed: access denied"));
+        assert!(message.contains("Suggested Fix:"));
+        assert!(message.contains("Check probe drivers installation"));
+        assert!(!message.contains("Likely Cause:"));
+        assert!(!message.contains("Use Zadig to install WinUSB for the J-Link device"));
+    }
+
+    #[test]
+    fn build_connect_plan_uses_user_requested_connection_settings() {
+        let args = ConnectArgs {
+            probe_selector: "auto".to_string(),
+            target_chip: "STM32F407VGTx".to_string(),
+            speed_khz: 1000,
+            connect_under_reset: true,
+            halt_after_connect: false,
+        };
+
+        let plan = build_connect_plan(&args);
+
+        assert_eq!(plan.speed_khz, 1000);
+        assert_eq!(plan.attach_method, ConnectAttachMethod::UnderReset);
+        assert!(!plan.halt_after_connect);
+    }
+
+    #[test]
+    fn build_rtt_attach_plan_stays_within_timeout_budget() {
+        let plan = build_rtt_attach_plan(3000);
+
+        assert_eq!(plan, vec![
+            (0, RttAttachStrategy::Elf),
+            (200, RttAttachStrategy::Elf),
+            (400, RttAttachStrategy::Ram),
+            (800, RttAttachStrategy::Ram),
+            (1200, RttAttachStrategy::Exact(0x2000_0000)),
+        ]);
+
+        let short_plan = build_rtt_attach_plan(300);
+        assert_eq!(short_plan, vec![
+            (0, RttAttachStrategy::Elf),
+            (200, RttAttachStrategy::Elf),
+        ]);
     }
 }
