@@ -60,6 +60,11 @@ pub struct VerifyMismatch {
 /// Flash manager for programming operations
 pub struct FlashManager;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProgramOptions {
+    verify: bool,
+}
+
 impl FlashManager {
     /// Create a new flash manager
     pub fn new() -> Self {
@@ -76,7 +81,8 @@ impl FlashManager {
         match erase_type {
             EraseType::All => {
                 debug!("Starting full flash erase");
-                flashing::erase_all(session, FlashProgress::empty())
+                let mut progress = FlashProgress::empty();
+                flashing::erase_all(session, &mut progress, false)
                     .map_err(|e| DebugError::FlashOperationFailed(format!("Full erase failed: {}", e)))?;
                 
                 info!("Full flash erase completed");
@@ -117,6 +123,7 @@ impl FlashManager {
         file_path: &Path,
         format: FileFormat,
         base_address: Option<u64>,
+        verify: bool,
     ) -> Result<ProgramResult> {
         let start_time = Instant::now();
         
@@ -132,21 +139,20 @@ impl FlashManager {
             FileFormat::Auto => {
                 // Auto-detect based on extension
                 match file_path.extension().and_then(|s| s.to_str()) {
-                    Some("elf") => flashing::Format::Elf,
+                    Some("elf") => flashing::Format::Elf(flashing::ElfOptions::default()),
                     Some("hex") => flashing::Format::Hex, 
                     Some("bin") => flashing::Format::Bin(probe_rs::flashing::BinOptions { base_address: None, skip: 0 }),
                     _ => return Err(DebugError::FlashOperationFailed("Cannot auto-detect file format".to_string())),
                 }
             }
-            FileFormat::Elf => flashing::Format::Elf,
+            FileFormat::Elf => flashing::Format::Elf(flashing::ElfOptions::default()),
             FileFormat::Hex => flashing::Format::Hex,
             FileFormat::Bin => flashing::Format::Bin(probe_rs::flashing::BinOptions { base_address, skip: 0 }),
         };
 
         // Setup download options - use default and override what we need
-        let mut options = flashing::DownloadOptions::default();
-        options.verify = true;
-        options.progress = None;
+        let mut options = build_download_options(ProgramOptions { verify });
+        options.progress = FlashProgress::empty();
 
         // Set base address for BIN files - this might need to be handled differently
         if matches!(probe_format, flashing::Format::Bin(_)) {
@@ -252,5 +258,25 @@ impl FlashManager {
 impl Default for FlashManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn build_download_options(program_options: ProgramOptions) -> flashing::DownloadOptions<'static> {
+    let mut options = flashing::DownloadOptions::default();
+    options.verify = program_options.verify;
+    options
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_download_options, ProgramOptions};
+
+    #[test]
+    fn download_options_respect_verify_flag() {
+        let options = build_download_options(ProgramOptions { verify: false });
+        assert!(!options.verify);
+
+        let options = build_download_options(ProgramOptions { verify: true });
+        assert!(options.verify);
     }
 }
