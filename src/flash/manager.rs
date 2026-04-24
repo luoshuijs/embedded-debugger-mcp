@@ -76,9 +76,11 @@ impl FlashManager {
         match erase_type {
             EraseType::All => {
                 debug!("Starting full flash erase");
-                flashing::erase_all(session, FlashProgress::empty()).map_err(|e| {
-                    DebugError::FlashOperationFailed(format!("Full erase failed: {}", e))
-                })?;
+                let mut progress = FlashProgress::empty();
+                flashing::erase_all(session, &mut progress, false)
+                    .map_err(|e| {
+                        DebugError::FlashOperationFailed(format!("Full erase failed: {}", e))
+                    })?;
 
                 info!("Full flash erase completed");
                 Ok(EraseResult {
@@ -88,7 +90,7 @@ impl FlashManager {
             }
             EraseType::Sectors { address, size } => {
                 Err(DebugError::FlashOperationFailed(format!(
-                    "Sector erase by address is not implemented safely for probe-rs 0.25 (requested address 0x{address:08X}, size {size} bytes). Use erase_type='all' or add a target-specific sector-index mapping before enabling this operation."
+                    "Sector erase by address is not implemented safely for probe-rs 0.31 (requested address 0x{address:08X}, size {size} bytes). Use erase_type='all' or add a target-specific sector-index mapping before enabling this operation."
                 )))
             }
         }
@@ -119,7 +121,7 @@ impl FlashManager {
             FileFormat::Auto => {
                 // Auto-detect based on extension
                 match file_path.extension().and_then(|s| s.to_str()) {
-                    Some("elf") => flashing::Format::Elf,
+                    Some("elf") => flashing::Format::Elf(flashing::ElfOptions::default()),
                     Some("hex") => flashing::Format::Hex,
                     Some("bin") => flashing::Format::Bin(probe_rs::flashing::BinOptions {
                         base_address,
@@ -132,7 +134,7 @@ impl FlashManager {
                     }
                 }
             }
-            FileFormat::Elf => flashing::Format::Elf,
+            FileFormat::Elf => flashing::Format::Elf(flashing::ElfOptions::default()),
             FileFormat::Hex => flashing::Format::Hex,
             FileFormat::Bin => flashing::Format::Bin(probe_rs::flashing::BinOptions {
                 base_address,
@@ -143,7 +145,7 @@ impl FlashManager {
         // Setup download options - use default and override what we need
         let mut options = flashing::DownloadOptions::default();
         options.verify = verify;
-        options.progress = None;
+        options.progress = FlashProgress::empty();
 
         // Set base address for BIN files - this might need to be handled differently
         if matches!(probe_format, flashing::Format::Bin(_)) {
