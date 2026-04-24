@@ -6,15 +6,15 @@
 //! tree — the model reasons over the evidence. This saves context (one call
 //! instead of ~6 `read_memory`) without over-teaching.
 
-use rmcp::{handler::server::tool::Parameters, model::*, tool, tool_router, ErrorData as McpError};
-use std::future::Future;
+use rmcp::{
+    handler::server::wrapper::Parameters, model::*, tool, tool_router, ErrorData as McpError,
+};
 use tracing::{debug, info};
 
 use super::session::EmbeddedDebuggerToolHandler;
 use crate::backend::{CoreRegId, DebugBackend};
 use crate::tools::types::*;
-use probe_rs::debug::{DebugInfo, DebugRegisters};
-use probe_rs::exception_handler_for_core;
+use probe_rs_debug::{exception_handler_for_core, DebugInfo, DebugRegisters};
 
 // ARMv7-M System Control Block fault registers (identical on all Cortex-M).
 // Source: ARMv7-M Architecture Reference Manual, System Control Block.
@@ -95,6 +95,7 @@ fn decode_exc_return(lr: u32) -> ExcReturn {
 /// the core registers; FP registers, if any, follow xPSR).
 const STACKED_LR_OFFSET: u64 = 0x14;
 const STACKED_PC_OFFSET: u64 = 0x18;
+const MAX_STACK_FRAME_COUNT: usize = 64;
 
 /// Build a frame JSON object from an address and its resolved source location.
 fn frame_json(index: usize, addr: u32, role: &str, di: &DebugInfo) -> serde_json::Value {
@@ -228,7 +229,13 @@ impl EmbeddedDebuggerToolHandler {
                 let handler = exception_handler_for_core(core.core_type());
                 let instruction_set = core.instruction_set().ok();
                 let stack = di
-                    .unwind(&mut core, registers, handler.as_ref(), instruction_set)
+                    .unwind(
+                        &mut core,
+                        registers,
+                        handler.as_ref(),
+                        instruction_set,
+                        MAX_STACK_FRAME_COUNT,
+                    )
                     .map_err(|e| {
                         McpError::internal_error(format!("Stack unwind failed: {}", e), None)
                     })?;

@@ -1,13 +1,17 @@
-use rmcp::{handler::server::tool::Parameters, model::*, tool, tool_router, ErrorData as McpError};
-use std::future::Future;
+use rmcp::{
+    handler::server::wrapper::Parameters, model::*, tool, tool_router, ErrorData as McpError,
+};
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use super::session::{DebugSession, EmbeddedDebuggerToolHandler};
 use crate::backend::{DebugBackend, OpenOcdBackend, ProbeRsBackend};
 use crate::rtt::RttManager;
 use crate::tools::types::*;
-use probe_rs::{probe::list::Lister, Permissions};
+use probe_rs::{
+    probe::{list::Lister, WireProtocol},
+    Permissions,
+};
 use tokio::sync::OwnedSemaphorePermit;
 
 #[tool_router(router = management_tool_router, vis = "pub")]
@@ -104,6 +108,15 @@ impl EmbeddedDebuggerToolHandler {
                 info!("Opening probe: {}", probe_info.identifier);
                 match probe_info.open() {
                     Ok(mut probe) => {
+                        if matches!(probe.protocol(), Some(WireProtocol::Jtag)) {
+                            if let Err(error) = probe.select_protocol(WireProtocol::Swd) {
+                                warn!(
+                                    "Failed to switch probe protocol to SWD before attach: {}",
+                                    error
+                                );
+                            }
+                        }
+
                         let actual_speed = probe.set_speed(args.speed_khz).map_err(|e| {
                             McpError::internal_error(
                                 format!(
@@ -222,13 +235,10 @@ impl EmbeddedDebuggerToolHandler {
                     }
                     Err(e) => {
                         error!("Failed to open probe '{}': {}", probe_info.identifier, e);
-                        let error_msg = format!(
-                            "Failed to open probe '{}'\n\nError: {}\n\n\
-                            Suggestions:\n\
-                            - Check probe drivers installation\n\
-                            - Verify USB connection\n\
-                            - Try disconnecting and reconnecting probe",
-                            probe_info.identifier, e
+                        let error_msg = format_probe_open_error_message(
+                            &probe_info.identifier,
+                            &e.to_string(),
+                            cfg!(windows),
                         );
                         Err(McpError::internal_error(error_msg, None))
                     }
@@ -328,6 +338,79 @@ impl EmbeddedDebuggerToolHandler {
 
         info!("Retrieved probe info for session: {}", args.session_id);
         Ok(CallToolResult::success(vec![Content::text(message)]))
+    }
+}
+
+fn format_probe_open_error_message(
+    probe_identifier: &str,
+    raw_error: &str,
+    is_windows: bool,
+) -> String {
+    let mut message = format!(
+        "Failed to open probe '{}'\n\n\
+        Summary:\n\
+        Unable to open the debug probe.\n\n\
+        Underlying Error:\n\
+        {}",
+        probe_identifier, raw_error
+    );
+
+    let normalized_identifier = probe_identifier.to_ascii_lowercase();
+    let normalized_error = raw_error.to_ascii_lowercase();
+    let is_jlink =
+        normalized_identifier.contains("j-link") || normalized_identifier.contains("jlink");
+    let has_winusb_hint = normalized_error.contains("winusb") || normalized_error.contains("zadig");
+    let is_usb_open_error = normalized_error.contains("opening the usb device")
+        || normalized_error.contains("taking control over usb device");
+
+    if is_windows && is_jlink && has_winusb_hint && is_usb_open_error {
+        message.push_str(
+            "\n\nLikely Cause:\n\
+            On Windows, this often means the J-Link is not using WinUSB.\n\n\
+            Suggested Fix:\n\
+            - Use Zadig to install WinUSB for the J-Link device\n\
+            - Reconnect the probe and try again\n\
+            - Note: this replaces the SEGGER J-Link driver for that interface",
+        );
+    } else {
+        message.push_str(
+            "\n\nSuggested Fix:\n\
+            - Check probe drivers installation\n\
+            - Verify USB connection\n\
+            - Try disconnecting and reconnecting probe",
+        );
+    }
+
+    message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_probe_open_error_message;
+
+    #[test]
+    fn includes_winusb_guidance_for_jlink_usb_open_errors_on_windows() {
+        let message = format_probe_open_error_message(
+            "J-Link Debug Probe",
+            "opening the USB device failed: install the WinUSB driver with Zadig",
+            true,
+        );
+
+        assert!(message.contains("Underlying Error:"));
+        assert!(message.contains("opening the USB device failed"));
+        assert!(message.contains("Use Zadig to install WinUSB"));
+    }
+
+    #[test]
+    fn keeps_generic_guidance_without_a_winusb_hint() {
+        let message = format_probe_open_error_message(
+            "J-Link Debug Probe",
+            "opening the USB device failed: access denied",
+            true,
+        );
+
+        assert!(message.contains("Check probe drivers installation"));
+        assert!(!message.contains("Use Zadig to install WinUSB"));
     }
 }
 

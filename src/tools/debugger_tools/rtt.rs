@@ -1,5 +1,6 @@
-use rmcp::{handler::server::tool::Parameters, model::*, tool, tool_router, ErrorData as McpError};
-use std::future::Future;
+use rmcp::{
+    handler::server::wrapper::Parameters, model::*, tool, tool_router, ErrorData as McpError,
+};
 use tracing::{debug, error, info};
 
 use super::formatting::parse_address;
@@ -22,8 +23,8 @@ impl EmbeddedDebuggerToolHandler {
         let session_arc = self.get_session(&args.session_id).await?;
 
         // Parse control block address if provided
-        let control_block_address = if let Some(addr_str) = args.control_block_address {
-            match parse_address(&addr_str) {
+        let control_block_address = if let Some(addr_str) = args.control_block_address.as_deref() {
+            match parse_address(addr_str) {
                 Ok(addr) => Some(addr),
                 Err(e) => {
                     let error_msg = format!("Invalid control block address '{}': {}", addr_str, e);
@@ -286,7 +287,7 @@ impl EmbeddedDebuggerToolHandler {
 
                 let mut bytes = Vec::new();
                 for chunk in binary_str.chars().collect::<Vec<_>>().chunks(8) {
-                    let byte_str: String = chunk.iter().collect();
+                    let byte_str: String = chunk.iter().copied().collect();
                     match u8::from_str_radix(&byte_str, 2) {
                         Ok(byte) => bytes.push(byte),
                         Err(e) => {

@@ -1,5 +1,6 @@
-use rmcp::{handler::server::tool::Parameters, model::*, tool, tool_router, ErrorData as McpError};
-use std::future::Future;
+use rmcp::{
+    handler::server::wrapper::Parameters, model::*, tool, tool_router, ErrorData as McpError,
+};
 use tracing::{debug, error, info};
 
 use super::session::EmbeddedDebuggerToolHandler;

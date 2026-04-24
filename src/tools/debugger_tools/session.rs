@@ -52,16 +52,20 @@ pub struct EmbeddedDebuggerToolHandler {
 }
 
 impl EmbeddedDebuggerToolHandler {
+    pub(crate) fn tool_router() -> ToolRouter<Self> {
+        Self::management_tool_router()
+            + Self::target_control_tool_router()
+            + Self::memory_tool_router()
+            + Self::diagnostics_tool_router()
+            + Self::rtt_tool_router()
+            + Self::flash_tool_router()
+    }
+
     pub fn new(config: impl Into<Config>) -> Self {
         let config = config.into();
         let max_sessions = config.server.max_sessions;
         Self {
-            tool_router: Self::management_tool_router()
-                + Self::target_control_tool_router()
-                + Self::memory_tool_router()
-                + Self::diagnostics_tool_router()
-                + Self::rtt_tool_router()
-                + Self::flash_tool_router(),
+            tool_router: Self::tool_router(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(config),
             max_sessions,

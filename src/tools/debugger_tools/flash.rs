@@ -1,10 +1,18 @@
-use rmcp::{handler::server::tool::Parameters, model::*, tool, tool_router, ErrorData as McpError};
-use std::future::Future;
+use rmcp::{
+    handler::server::wrapper::Parameters, model::*, tool, tool_router, ErrorData as McpError,
+};
 use tracing::{debug, error, info, warn};
 
 use super::formatting::{parse_address, parse_data};
 use super::session::EmbeddedDebuggerToolHandler;
 use crate::tools::types::*;
+
+#[derive(Debug, Clone, Copy)]
+enum RttAttachStrategy {
+    Elf,
+    Ram,
+    Exact(u64),
+}
 
 #[tool_router(router = flash_tool_router, vis = "pub")]
 impl EmbeddedDebuggerToolHandler {
@@ -29,9 +37,9 @@ impl EmbeddedDebuggerToolHandler {
         let erase_type = match args.erase_type.as_str() {
             "all" => crate::flash::EraseType::All,
             "sectors" => {
-                let address = match args.address {
+                let address = match args.address.as_deref() {
                     Some(addr_str) => {
-                        parse_address(&addr_str).map_err(|e| McpError::internal_error(e, None))?
+                        parse_address(addr_str).map_err(|e| McpError::internal_error(e, None))?
                     }
                     None => {
                         return Err(McpError::internal_error(
@@ -133,8 +141,8 @@ impl EmbeddedDebuggerToolHandler {
         };
 
         // Parse base address if provided
-        let base_address = if let Some(addr_str) = args.base_address {
-            Some(parse_address(&addr_str).map_err(|e| McpError::internal_error(e, None))?)
+        let base_address = if let Some(addr_str) = args.base_address.as_deref() {
+            Some(parse_address(addr_str).map_err(|e| McpError::internal_error(e, None))?)
         } else {
             None
         };
@@ -496,70 +504,61 @@ impl EmbeddedDebuggerToolHandler {
             }
         }
 
-        // Step 4: Attach RTT (if requested) - Mimic probe-rs run behavior
+        // Step 4: Attach RTT (if requested)
         if args.attach_rtt {
             status_messages.push("Step 4/5: Attaching RTT...".to_string());
 
-            let timeout = tokio::time::Duration::from_millis(args.rtt_timeout_ms as u64);
-            let started = tokio::time::Instant::now();
+            let steps = [
+                (0, RttAttachStrategy::Elf),
+                (200, RttAttachStrategy::Elf),
+                (400, RttAttachStrategy::Ram),
+                (800, RttAttachStrategy::Ram),
+                (1200, RttAttachStrategy::Exact(0x2000_0000)),
+            ];
+            let plan = steps
+                .into_iter()
+                .filter(|(delay_ms, _)| *delay_ms <= args.rtt_timeout_ms as u64)
+                .collect::<Vec<_>>();
+            let started = std::time::Instant::now();
             let mut rtt_attached = false;
             let mut last_rtt_error = None;
-            let mut attempt = 1;
 
-            loop {
-                if attempt > 1 {
-                    let remaining = timeout.saturating_sub(started.elapsed());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    tokio::time::sleep(remaining.min(tokio::time::Duration::from_millis(500)))
+            for (index, (delay_ms, strategy)) in plan.iter().enumerate() {
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                if *delay_ms > elapsed_ms {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(*delay_ms - elapsed_ms))
                         .await;
                 }
 
-                // Try RTT attachment with different strategies (probe-rs style optimization)
+                let attempt = index + 1;
+                info!(
+                    "RTT attach attempt {}/{} using {:?} at {}ms (timeout {}ms)",
+                    attempt,
+                    plan.len(),
+                    strategy,
+                    delay_ms,
+                    args.rtt_timeout_ms
+                );
+
                 let mut rtt_manager = session_arc.rtt_manager.lock().await;
-                let rtt_result = match attempt {
-                    1..=2 => {
-                        // First 2 attempts: ELF symbol detection (probe-rs priority method)
-                        debug!(
-                            "RTT attempt {}: Using ELF symbol detection (probe-rs style)",
-                            attempt
-                        );
+                let rtt_result = match strategy {
+                    RttAttachStrategy::Elf => {
                         rtt_manager
                             .attach_with_elf(session_arc.probe_session()?, &file_path)
                             .await
                     }
-                    3..=5 => {
-                        // Attempts 3-5: standard attach, let probe-rs auto-scan memory
-                        debug!("RTT attempt {}: Using standard memory map scan", attempt);
+                    RttAttachStrategy::Ram => {
                         rtt_manager
                             .attach(session_arc.probe_session()?, None, None)
                             .await
                     }
-                    6..=7 => {
-                        // Attempts 6-7: try STM32G4 specific memory ranges
-                        debug!(
-                            "RTT attempt {}: Using STM32G4 specific memory ranges",
-                            attempt
-                        );
-                        let stm32g4_ranges = vec![
-                            (0x20000000, 0x20004000), // SRAM1 first half: 16KB - most likely RTT location
-                            (0x20004000, 0x20008000), // SRAM1 second half: 16KB
-                            (0x20008000, 0x2000A000), // SRAM2: 8KB
-                        ];
+                    RttAttachStrategy::Exact(control_block_address) => {
                         rtt_manager
-                            .attach(session_arc.probe_session()?, None, Some(stm32g4_ranges))
-                            .await
-                    }
-                    _ => {
-                        // Last attempt: try common RTT control block addresses
-                        let cb_addr = 0x20000000;
-                        debug!(
-                            "RTT attempt {}: Using specific control block address 0x{:08X}",
-                            attempt, cb_addr
-                        );
-                        rtt_manager
-                            .attach(session_arc.probe_session()?, Some(cb_addr), None)
+                            .attach(
+                                session_arc.probe_session()?,
+                                Some(*control_block_address),
+                                None,
+                            )
                             .await
                     }
                 };
@@ -577,22 +576,22 @@ impl EmbeddedDebuggerToolHandler {
                         break;
                     }
                     Err(e) => {
-                        debug!("RTT attach attempt {} failed: {}", attempt, e);
+                        debug!(
+                            "RTT attach attempt {}/{} failed: {}",
+                            attempt,
+                            plan.len(),
+                            e
+                        );
                         last_rtt_error = Some(e.to_string());
                     }
                 }
-
-                if args.rtt_timeout_ms == 0 || started.elapsed() >= timeout {
-                    break;
-                }
-                attempt += 1;
             }
 
             if !rtt_attached {
                 let error_msg = format!(
                     "RTT attach failed within {}ms after {} attempt(s): {}",
                     args.rtt_timeout_ms,
-                    attempt,
+                    plan.len(),
                     last_rtt_error.unwrap_or_else(|| "timeout expired".to_string())
                 );
                 status_messages.push(error_msg.clone());
@@ -602,9 +601,6 @@ impl EmbeddedDebuggerToolHandler {
                     None,
                 ));
             }
-
-            info!("RTT connected successfully, allowing channel stabilization...");
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
 
         status_messages.push("Step 5/5: Finalizing...".to_string());
