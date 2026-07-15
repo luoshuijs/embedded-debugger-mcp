@@ -27,10 +27,23 @@ pub struct ConnectArgs {
     /// Whether to halt after connecting
     #[serde(default = "default_true")]
     pub halt_after_connect: bool,
+    /// Debug engine: "probe-rs" (default, native) or "openocd" (GDB RSP).
+    #[serde(default = "default_backend")]
+    pub backend: String,
+    /// OpenOCD GDB remote address when backend="openocd" (default "127.0.0.1:3333").
+    /// Requires a running `openocd` exposing its GDB port.
+    #[serde(default = "default_openocd_address")]
+    pub openocd_address: String,
 }
 
 fn default_speed_khz() -> u32 {
     4000
+}
+fn default_backend() -> String {
+    "probe-rs".to_string()
+}
+fn default_openocd_address() -> String {
+    "127.0.0.1:3333".to_string()
 }
 fn default_true() -> bool {
     true
@@ -88,6 +101,16 @@ pub struct StepArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetStatusArgs {
+    /// Session ID
+    pub session_id: String,
+}
+
+// =============================================================================
+// Diagnostics Types
+// =============================================================================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiagnoseFaultArgs {
     /// Session ID
     pub session_id: String,
 }

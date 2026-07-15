@@ -4,9 +4,11 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use super::session::{DebugSession, EmbeddedDebuggerToolHandler};
+use crate::backend::{DebugBackend, OpenOcdBackend, ProbeRsBackend};
 use crate::rtt::RttManager;
 use crate::tools::types::*;
 use probe_rs::{probe::list::Lister, Permissions};
+use tokio::sync::OwnedSemaphorePermit;
 
 #[tool_router(router = management_tool_router, vis = "pub")]
 impl EmbeddedDebuggerToolHandler {
@@ -73,6 +75,11 @@ impl EmbeddedDebuggerToolHandler {
                     None,
                 )
             })?;
+
+        // OpenOCD backend: talk to an already-running openocd over GDB RSP.
+        if args.backend.eq_ignore_ascii_case("openocd") {
+            return self.connect_openocd(&args, session_slot).await;
+        }
 
         // Real probe-rs implementation
         let probes = Lister::new().list_all();
@@ -150,12 +157,17 @@ impl EmbeddedDebuggerToolHandler {
 
                                 let session_id = format!("session_{}", uuid::Uuid::new_v4());
 
+                                let shared_session = Arc::new(tokio::sync::Mutex::new(session));
+                                let backend: Box<dyn DebugBackend> =
+                                    Box::new(ProbeRsBackend::new(shared_session.clone()));
+
                                 let debug_session = DebugSession {
                                     session_id: session_id.clone(),
                                     probe_identifier: probe_info.identifier.clone(),
                                     target_chip: args.target_chip.clone(),
                                     created_at: chrono::Utc::now(),
-                                    session: Arc::new(tokio::sync::Mutex::new(session)),
+                                    backend: Arc::new(tokio::sync::Mutex::new(backend)),
+                                    probe_rs_session: Some(shared_session),
                                     rtt_manager: Arc::new(tokio::sync::Mutex::new(
                                         RttManager::new(),
                                     )),
@@ -315,6 +327,65 @@ impl EmbeddedDebuggerToolHandler {
         );
 
         info!("Retrieved probe info for session: {}", args.session_id);
+        Ok(CallToolResult::success(vec![Content::text(message)]))
+    }
+}
+
+impl EmbeddedDebuggerToolHandler {
+    /// Establish a session backed by an already-running OpenOCD over GDB RSP.
+    async fn connect_openocd(
+        &self,
+        args: &ConnectArgs,
+        session_slot: OwnedSemaphorePermit,
+    ) -> Result<CallToolResult, McpError> {
+        let address = args.openocd_address.clone();
+        info!("Connecting via OpenOCD GDB RSP at {}", address);
+
+        let mut backend = OpenOcdBackend::connect(&address).await.map_err(|e| {
+            McpError::internal_error(
+                format!(
+                    "Failed to connect to OpenOCD at {}: {}. Ensure openocd is running and \
+                     exposing its GDB port (e.g. openocd -f interface/stlink.cfg -f target/stm32f4x.cfg).",
+                    address, e
+                ),
+                None,
+            )
+        })?;
+
+        if args.halt_after_connect {
+            let _ = backend.halt().await;
+        }
+
+        let session_id = format!("session_{}", uuid::Uuid::new_v4());
+        let boxed: Box<dyn DebugBackend> = Box::new(backend);
+        let debug_session = DebugSession {
+            session_id: session_id.clone(),
+            probe_identifier: format!("openocd@{}", address),
+            target_chip: args.target_chip.clone(),
+            created_at: chrono::Utc::now(),
+            backend: Arc::new(tokio::sync::Mutex::new(boxed)),
+            probe_rs_session: None,
+            rtt_manager: Arc::new(tokio::sync::Mutex::new(RttManager::new())),
+            _session_slot: session_slot,
+        };
+
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(session_id.clone(), Arc::new(debug_session));
+        }
+
+        let message = format!(
+            "Debug session established (OpenOCD backend).\n\n\
+            Session ID: {}\n\
+            OpenOCD: {}\n\
+            Target: {}\n\
+            Halted after connect: {}\n\n\
+            Available: read_memory, write_memory, halt, run, step, reset, breakpoints, \
+            diagnose_fault. Flash and RTT require the probe-rs backend.",
+            session_id, address, args.target_chip, args.halt_after_connect
+        );
+
+        info!("Created OpenOCD debug session: {}", session_id);
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 }

@@ -61,7 +61,8 @@ impl EmbeddedDebuggerToolHandler {
 
         // Perform erase operation
         {
-            let mut session = session_arc.session.lock().await;
+            let probe_session = session_arc.probe_session()?;
+            let mut session = probe_session.lock().await;
             match crate::flash::FlashManager::erase_flash(&mut session, erase_type).await {
                 Ok(result) => {
                     let message = format!(
@@ -140,7 +141,8 @@ impl EmbeddedDebuggerToolHandler {
 
         // Perform programming operation
         {
-            let mut session = session_arc.session.lock().await;
+            let probe_session = session_arc.probe_session()?;
+            let mut session = probe_session.lock().await;
             let verify = args.verify || self.config.flash.verify_after_program;
             match crate::flash::FlashManager::program_file(
                 &mut session,
@@ -291,7 +293,8 @@ impl EmbeddedDebuggerToolHandler {
 
         // Perform verification
         {
-            let mut session = session_arc.session.lock().await;
+            let probe_session = session_arc.probe_session()?;
+            let mut session = probe_session.lock().await;
             match crate::flash::FlashManager::verify_flash(&mut session, expected_data, address)
                 .await
             {
@@ -388,7 +391,8 @@ impl EmbeddedDebuggerToolHandler {
         // Step 1: Erase flash
         status_messages.push("Step 1/5: Erasing flash memory...".to_string());
         {
-            let mut session = session_arc.session.lock().await;
+            let probe_session = session_arc.probe_session()?;
+            let mut session = probe_session.lock().await;
             match crate::flash::FlashManager::erase_flash(
                 &mut session,
                 crate::flash::EraseType::All,
@@ -423,7 +427,8 @@ impl EmbeddedDebuggerToolHandler {
         };
 
         {
-            let mut session = session_arc.session.lock().await;
+            let probe_session = session_arc.probe_session()?;
+            let mut session = probe_session.lock().await;
             match crate::flash::FlashManager::program_file(
                 &mut session,
                 &file_path,
@@ -451,7 +456,8 @@ impl EmbeddedDebuggerToolHandler {
         if args.reset_after_flash {
             status_messages.push("Step 3/5: Resetting target...".to_string());
             {
-                let mut session = session_arc.session.lock().await;
+                let probe_session = session_arc.probe_session()?;
+                let mut session = probe_session.lock().await;
                 let mut core = match session.core(0) {
                     Ok(core) => core,
                     Err(e) => {
@@ -520,14 +526,14 @@ impl EmbeddedDebuggerToolHandler {
                             attempt
                         );
                         rtt_manager
-                            .attach_with_elf(session_arc.session.clone(), &file_path)
+                            .attach_with_elf(session_arc.probe_session()?, &file_path)
                             .await
                     }
                     3..=5 => {
                         // Attempts 3-5: standard attach, let probe-rs auto-scan memory
                         debug!("RTT attempt {}: Using standard memory map scan", attempt);
                         rtt_manager
-                            .attach(session_arc.session.clone(), None, None)
+                            .attach(session_arc.probe_session()?, None, None)
                             .await
                     }
                     6..=7 => {
@@ -542,7 +548,7 @@ impl EmbeddedDebuggerToolHandler {
                             (0x20008000, 0x2000A000), // SRAM2: 8KB
                         ];
                         rtt_manager
-                            .attach(session_arc.session.clone(), None, Some(stm32g4_ranges))
+                            .attach(session_arc.probe_session()?, None, Some(stm32g4_ranges))
                             .await
                     }
                     _ => {
@@ -553,7 +559,7 @@ impl EmbeddedDebuggerToolHandler {
                             attempt, cb_addr
                         );
                         rtt_manager
-                            .attach(session_arc.session.clone(), Some(cb_addr), None)
+                            .attach(session_arc.probe_session()?, Some(cb_addr), None)
                             .await
                     }
                 };

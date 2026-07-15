@@ -3,22 +3,44 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
+use crate::backend::DebugBackend;
 use crate::config::Config;
 use crate::rtt::RttManager;
 use probe_rs::Session;
 
-/// Debug session information
+/// Debug session information.
+///
+/// `backend` is the unified execution engine (probe-rs or OpenOCD) that the
+/// core/memory/control tools drive. `probe_rs_session` is only present for
+/// probe-rs sessions and is retained so probe-rs-specific tools (flash, RTT)
+/// can keep using the native `Session` directly.
 pub struct DebugSession {
     pub session_id: String,
     pub probe_identifier: String,
     pub target_chip: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    pub session: Arc<tokio::sync::Mutex<Session>>,
+    pub backend: Arc<tokio::sync::Mutex<Box<dyn DebugBackend>>>,
+    pub probe_rs_session: Option<Arc<tokio::sync::Mutex<Session>>>,
     pub rtt_manager: Arc<tokio::sync::Mutex<RttManager>>,
     pub(super) _session_slot: OwnedSemaphorePermit,
 }
 
-/// Embedded debugger tool handler with debug, RTT, and flash tools
+impl DebugSession {
+    /// Return the probe-rs `Session` for probe-rs-only operations, or a clear
+    /// error when the active session uses the OpenOCD backend.
+    pub(super) fn probe_session(&self) -> Result<Arc<tokio::sync::Mutex<Session>>, McpError> {
+        self.probe_rs_session.clone().ok_or_else(|| {
+            McpError::internal_error(
+                "This operation requires the probe-rs backend; the active session uses OpenOCD. \
+                 Reconnect with backend=\"probe-rs\" for flash/RTT operations."
+                    .to_string(),
+                None,
+            )
+        })
+    }
+}
+
+/// Embedded debugger tool handler with debug, RTT, and flash tools.
 #[derive(Clone)]
 pub struct EmbeddedDebuggerToolHandler {
     #[allow(dead_code)]
@@ -37,6 +59,7 @@ impl EmbeddedDebuggerToolHandler {
             tool_router: Self::management_tool_router()
                 + Self::target_control_tool_router()
                 + Self::memory_tool_router()
+                + Self::diagnostics_tool_router()
                 + Self::rtt_tool_router()
                 + Self::flash_tool_router(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -82,7 +105,7 @@ mod tests {
             .map(|tool| tool.name.as_ref())
             .collect::<std::collections::HashSet<_>>();
 
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 23);
         for expected in [
             "list_probes",
             "connect",
@@ -97,6 +120,7 @@ mod tests {
             "write_memory",
             "set_breakpoint",
             "clear_breakpoint",
+            "diagnose_fault",
             "rtt_attach",
             "rtt_detach",
             "rtt_read",
