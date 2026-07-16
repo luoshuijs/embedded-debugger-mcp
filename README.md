@@ -4,17 +4,22 @@
 [![RMCP](https://img.shields.io/badge/RMCP-0.3.2-blue.svg)](https://github.com/modelcontextprotocol/rust-sdk)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Embedded Debugger MCP is a Rust server for embedded debugging through
-probe-rs. It exposes MCP tools for AI assistants and also includes a small CLI
-and bundled skill for users who want a command-driven workflow without setting
-up an MCP client first.
+Embedded Debugger MCP is a Rust server for embedded debugging through either
+probe-rs (native) or OpenOCD (via the GDB Remote Serial Protocol). It exposes a
+single MCP tool set for AI assistants — probe discovery, target control, memory,
+breakpoints, flash, RTT, and AI-facing crash diagnosis — plus a small CLI and
+bundled skill for a command-driven workflow without setting up an MCP client
+first.
 
 Language versions: [English](README.md) | [中文](README_zh.md)
 
 ## What It Provides
 
+- One MCP tool set over two interchangeable backends (probe-rs native, or
+  OpenOCD via GDB RSP), chosen at connect. Validated on real ESP32-S3.
 - MCP tools for probe discovery, target connection, core control, memory access,
-  breakpoints, flash programming, and RTT communication.
+  breakpoints, flash programming, RTT communication, and crash diagnosis
+  (`diagnose_fault`, `unwind_exception`).
 - CLI commands for environment checks, configuration inspection, probe listing,
   MCP serving, and skill prompt handoff.
 - A Codex/Claude Code compatible skill at `skills/embedded-debugger`.
@@ -27,10 +32,13 @@ Language versions: [English](README.md) | [中文](README_zh.md)
 MCP client or CLI
         |
         v
-embedded-debugger-mcp
+embedded-debugger-mcp  (one MCP tool set)
         |
         v
-probe-rs -> debug probe -> target MCU
+DebugBackend:  probe-rs (native)  |  OpenOCD (GDB RSP)
+        |
+        v
+debug probe / openocd  ->  target MCU
 ```
 
 ## Requirements

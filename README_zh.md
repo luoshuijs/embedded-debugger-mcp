@@ -4,16 +4,20 @@
 [![RMCP](https://img.shields.io/badge/RMCP-0.3.2-blue.svg)](https://github.com/modelcontextprotocol/rust-sdk)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Embedded Debugger MCP 是一个基于 probe-rs 的 Rust 嵌入式调试服务器。它为
-AI 助手提供 MCP 工具，同时也提供小型 CLI 和内置 skill，让用户即使不安装
-MCP 客户端，也可以先用命令行工作流完成检查和引导。
+Embedded Debugger MCP 是一个 Rust 嵌入式调试服务器，可通过 probe-rs（原生）
+或 OpenOCD（走 GDB Remote Serial Protocol）两种后端调试。它为 AI 助手提供同一套
+MCP 工具——探针发现、目标控制、内存、断点、Flash、RTT，以及面向 AI 的崩溃诊断
+——同时也提供小型 CLI 和内置 skill，让用户即使不安装 MCP 客户端也能先用命令行
+工作流。
 
 语言版本: [English](README.md) | [中文](README_zh.md)
 
 ## 功能
 
-- MCP 工具覆盖探针发现、目标连接、核心控制、内存访问、断点、Flash 编程和
-  RTT 通信。
+- 同一套 MCP 工具运行在两种可切换后端上（probe-rs 原生 / OpenOCD 走 GDB RSP），
+  在 connect 时选择。已在真实 ESP32-S3 上验证。
+- MCP 工具覆盖探针发现、目标连接、核心控制、内存访问、断点、Flash 编程、RTT 通信
+  和崩溃诊断（`diagnose_fault`、`unwind_exception`）。
 - CLI 命令覆盖环境检查、配置查看、探针列表、MCP 启动和 skill prompt 输出。
 - 内置 Codex / Claude Code 兼容 skill: `skills/embedded-debugger`。
 - 发布检查覆盖 rustfmt、clippy、测试、文档、打包和 STM32 demo 构建。
@@ -24,10 +28,13 @@ MCP 客户端，也可以先用命令行工作流完成检查和引导。
 MCP client or CLI
         |
         v
-embedded-debugger-mcp
+embedded-debugger-mcp  (one MCP tool set)
         |
         v
-probe-rs -> debug probe -> target MCU
+DebugBackend:  probe-rs (native)  |  OpenOCD (GDB RSP)
+        |
+        v
+debug probe / openocd  ->  target MCU
 ```
 
 ## 要求
