@@ -41,7 +41,8 @@ debug probe / openocd  ->  target MCU
 
 - Rust stable 工具链。
 - probe-rs 兼容调试探针，例如 ST-Link、J-Link、DAPLink、Black Magic Probe
-  或受支持的 FTDI 探针。
+  或受支持的 FTDI 探针。或者一个已运行、暴露了 GDB 端口的 `openocd`（例如 ESP32
+  用 openocd-esp32），以使用 `openocd` 后端。
 - 目标芯片和可工作的 SWD/JTAG 连线。
 - STM32 demo 固件检查需要 nightly Rust 和 `rust-src`。
 
@@ -227,6 +228,20 @@ RTT:
 | `rtt_channels` | 列出发现的 RTT 通道。 |
 | `rtt_read` | 从上行通道读取，并遵守最大字节数和超时限制。 |
 | `rtt_write` | 向下行通道写入。 |
+
+## 崩溃诊断
+
+芯片崩溃后，先 halt，再让模型基于证据推理：
+
+1. `halt`，然后 `diagnose_fault`——一次调用读取 Cortex-M SCB 故障寄存器
+   （CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID）及 PC/SP/LR，返回含已置位故障标志的紧凑
+   结构化证据；只给证据、不下根因结论。
+2. `unwind_exception`（带 `elf_path`）——把崩溃映射到源码行。probe-rs 后端给出
+   完整 DWARF 调用栈（每帧函数名 + `file:line`）；OpenOCD 后端读取异常栈帧并映射
+   出错 PC / 调用者 LR。
+
+两者都是 Cortex-M 专属（SCB 寄存器、ARM 异常帧），不适用于 Xtensa（ESP32）。源码
+映射需要固件带调试信息（`.debug_line`）。
 
 ## 安全说明
 

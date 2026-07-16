@@ -45,7 +45,9 @@ debug probe / openocd  ->  target MCU
 
 - Rust stable toolchain.
 - A probe-rs compatible debug probe such as ST-Link, J-Link, DAPLink, Black
-  Magic Probe, or a supported FTDI-based probe.
+  Magic Probe, or a supported FTDI-based probe. Alternatively, a running
+  `openocd` exposing its GDB port (e.g. openocd-esp32 for ESP32) to use the
+  `openocd` backend.
 - A supported target chip and working SWD/JTAG wiring for hardware operations.
 - Nightly Rust plus `rust-src` for the bundled STM32 demo firmware check.
 
@@ -235,6 +237,23 @@ RTT:
 | `rtt_channels` | List discovered RTT channels. |
 | `rtt_read` | Read from an up channel with max byte and timeout limits. |
 | `rtt_write` | Write to a down channel. |
+
+## Crash Diagnosis
+
+After a crash, halt the core and let the model reason over the evidence:
+
+1. `halt`, then `diagnose_fault` — reads the Cortex-M SCB fault registers
+   (CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID) plus PC/SP/LR in one call and returns a
+   compact structured bundle with the set fault bits. It reports evidence; it
+   does not assert a root cause.
+2. `unwind_exception` with `elf_path` — maps the crash to source lines. On the
+   probe-rs backend this is a full DWARF backtrace (function + `file:line` per
+   frame); on the OpenOCD backend it reads the exception stack frame and maps
+   the faulting PC / caller LR.
+
+Both are Cortex-M specific (SCB registers, ARM exception frame) and do not apply
+to Xtensa (ESP32) targets. The firmware must be built with debug info
+(`.debug_line`) for source mapping.
 
 ## Safety Notes
 
