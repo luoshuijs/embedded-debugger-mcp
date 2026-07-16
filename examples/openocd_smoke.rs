@@ -8,9 +8,9 @@
 //! Usage:
 //!   cargo run --release --example openocd_smoke -- [addr] [mem_hex]
 //!
-//! Notes: memory read/write and halt/run are architecture-neutral. Register
-//! reads use ARM gdb register numbers, so PC/SP/LR are expected to be wrong on
-//! Xtensa (ESP32-S3) — that mismatch is the point of running this on hardware.
+//! Notes: memory read/write and halt/run are architecture-neutral. Registers
+//! are read by name via openocd's `monitor reg`, so PC/SP/LR read correctly on
+//! both ARM and Xtensa (verified on real ESP32-S3).
 
 use embedded_debugger_mcp::backend::{CoreRegId, DebugBackend, OpenOcdBackend};
 
@@ -55,10 +55,10 @@ async fn main() {
         }
     }
 
-    // Expected to be wrong on Xtensa (ARM gdb register numbering).
+    // Read by name via 'monitor reg' — correct on ARM and Xtensa.
     for reg in [CoreRegId::Pc, CoreRegId::Sp, CoreRegId::Lr] {
         match be.core_reg(reg).await {
-            Ok(v) => println!("{reg:<10?}: 0x{v:08X}  (ARM reg-number; wrong on Xtensa)"),
+            Ok(v) => println!("{reg:<10?}: 0x{v:08X}"),
             Err(e) => println!("{reg:<10?}: ERR {e}"),
         }
     }
