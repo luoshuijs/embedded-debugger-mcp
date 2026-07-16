@@ -144,3 +144,130 @@ impl DebugBackend for OpenOcdBackend {
         expect_ok(&reply, "clear breakpoint")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{CoreRegId, CoreState, DebugBackend};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    fn checksum(bytes: &[u8]) -> u8 {
+        bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b))
+    }
+
+    /// Read one RSP packet payload from a socket ($payload#cc). None on EOF.
+    async fn read_packet(sock: &mut TcpStream) -> Option<String> {
+        let mut b = [0u8; 1];
+        loop {
+            if sock.read_exact(&mut b).await.is_err() {
+                return None;
+            }
+            if b[0] == b'$' {
+                break;
+            }
+        }
+        let mut data = Vec::new();
+        loop {
+            sock.read_exact(&mut b).await.ok()?;
+            if b[0] == b'#' {
+                break;
+            }
+            data.push(b[0]);
+        }
+        let mut cks = [0u8; 2];
+        sock.read_exact(&mut cks).await.ok()?;
+        String::from_utf8(data).ok()
+    }
+
+    async fn send_packet(sock: &mut TcpStream, payload: &str) {
+        let framed = format!("${}#{:02x}", payload, checksum(payload.as_bytes()));
+        sock.write_all(framed.as_bytes()).await.unwrap();
+        sock.flush().await.unwrap();
+    }
+
+    /// Minimal GDB-RSP server that answers the subset our client uses.
+    async fn mock_rsp_server(listener: TcpListener) {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        loop {
+            let pkt = match read_packet(&mut sock).await {
+                Some(p) => p,
+                None => break,
+            };
+            // Ack the client's packet.
+            sock.write_all(b"+").await.unwrap();
+
+            // "OK" acknowledges memory writes, monitor (qRcmd) commands, and
+            // breakpoint set/clear; the others return specific payloads.
+            let resp: &str = if pkt.starts_with('m') {
+                "deadbeef" // 4 bytes for a read
+            } else if pkt == "pf" {
+                "00010008" // PC = 0x08000100, little-endian
+            } else if pkt.starts_with('p') {
+                "00000000"
+            } else if pkt == "?" {
+                "T05" // halted
+            } else if pkt.starts_with('M')
+                || pkt.starts_with("qRcmd")
+                || pkt.starts_with('Z')
+                || pkt.starts_with('z')
+            {
+                "OK"
+            } else {
+                ""
+            };
+
+            send_packet(&mut sock, resp).await;
+
+            // Read the client's ack for our response.
+            let mut ack = [0u8; 1];
+            if sock.read_exact(&mut ack).await.is_err() {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openocd_backend_drives_rsp_end_to_end() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(mock_rsp_server(listener));
+
+        let mut backend = OpenOcdBackend::connect(&addr).await.expect("connect");
+        assert_eq!(backend.kind(), BackendKind::OpenOcd);
+
+        // Memory read: "m..,4" -> "deadbeef".
+        let data = backend.read_bytes(0x2000_0000, 4).await.expect("read");
+        assert_eq!(data, vec![0xde, 0xad, 0xbe, 0xef]);
+
+        // Memory write: "M..:..." -> OK.
+        backend
+            .write_bytes(0x2000_0000, &[0x01, 0x02])
+            .await
+            .expect("write");
+
+        // Register read: "pf" (r15/PC) -> little-endian 0x08000100.
+        let pc = backend.core_reg(CoreRegId::Pc).await.expect("reg");
+        assert_eq!(pc, 0x0800_0100);
+
+        // Status: "?" -> T05 => Halted.
+        assert_eq!(backend.status().await.unwrap(), CoreState::Halted);
+
+        // Control via monitor (qRcmd) -> OK.
+        backend.halt().await.expect("halt");
+        backend.run().await.expect("run");
+
+        // Breakpoints: Z1/z1 -> OK.
+        backend
+            .set_hw_breakpoint(0x0800_0100)
+            .await
+            .expect("set bp");
+        backend
+            .clear_hw_breakpoint(0x0800_0100)
+            .await
+            .expect("clear bp");
+
+        drop(backend);
+        let _ = server.await;
+    }
+}
