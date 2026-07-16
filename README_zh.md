@@ -156,8 +156,12 @@ validator 时验证标准 `SKILL.md` 布局，第三个命令验证 Claude Code 
 - `backend: "probe-rs"`（默认）——原生 probe-rs，完整支持 flash 与 RTT。
 - `backend: "openocd"`（实验性）——通过 GDB Remote Serial Protocol 连接一个已运行
   的 `openocd`（`openocd_address`，默认 `127.0.0.1:3333`），用于 probe-rs 覆盖不佳的
-  芯片。核心/内存/控制/断点与 `diagnose_fault` 可用；flash 与 RTT 暂仅 probe-rs 支持。
-  该后端尚未经过真实硬件验证。
+  芯片（如 Xtensa ESP32，走 openocd-esp32）。内存读写与 halt/run/step/reset 已在真实
+  ESP32-S3 上验证；flash 与 RTT 暂仅 probe-rs。读寄存器目前用 ARM 的 gdb 寄存器号，
+  在 Xtensa 上 PC/SP 会不对（已知局限）；`diagnose_fault` 与 `unwind_exception` 是
+  Cortex-M 专属。启动 openocd 时须加 `gdb_memory_map disable`，否则它会在 GDB 连接时
+  探 flash 失败并拒绝连接，例如
+  `openocd -f board/esp32s3-builtin.cfg -c "gdb_memory_map disable"`。
 
 对 AI 而言两者是同一套工具，只有 `connect` 参数不同。
 

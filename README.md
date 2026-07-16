@@ -161,9 +161,14 @@ The tools run over one of two interchangeable engines, selected at `connect`:
 - `backend: "probe-rs"` (default) — native probe-rs; full flash and RTT support.
 - `backend: "openocd"` (experimental) — connects to an already-running `openocd`
   over its GDB port (`openocd_address`, default `127.0.0.1:3333`) using the GDB
-  Remote Serial Protocol. Intended for targets probe-rs does not cover. Core,
-  memory, control, breakpoints, and `diagnose_fault` are available; flash and RTT
-  are probe-rs only for now. This backend is not yet hardware-validated.
+  Remote Serial Protocol. Intended for targets probe-rs does not cover (e.g.
+  Xtensa ESP32 via openocd-esp32). Memory access and halt/run/step/reset are
+  validated on real ESP32-S3; flash and RTT are probe-rs only. Register reads
+  currently use ARM gdb register numbers, so PC/SP are wrong on Xtensa (known
+  limitation); `diagnose_fault` and `unwind_exception` are Cortex-M specific.
+  Start openocd with `gdb_memory_map disable`, otherwise it probes flash on the
+  GDB connect, fails, and rejects the connection — e.g.
+  `openocd -f board/esp32s3-builtin.cfg -c "gdb_memory_map disable"`.
 
 The AI sees the same tool set for both; only `connect` arguments change.
 

@@ -31,6 +31,13 @@ impl OpenOcdBackend {
 }
 
 /// gdb register numbers for the ARM core profile (stable subset).
+///
+/// TODO(xtensa): these are ARM gdb register numbers. On Xtensa targets
+/// (ESP32/-S2/-S3 via openocd-esp32) they do not map to PC/SP/LR — verified on
+/// real ESP32-S3 where `core_reg` returns 0. Add a per-architecture register
+/// map (or query the target's register layout) for real Xtensa/RISC-V support.
+/// Memory access (`m`/`M`) and monitor control are architecture-neutral and
+/// work today.
 fn reg_number(reg: CoreRegId) -> u32 {
     match reg {
         CoreRegId::Sp => 13,
