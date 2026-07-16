@@ -4,17 +4,22 @@
 [![RMCP](https://img.shields.io/badge/RMCP-0.3.2-blue.svg)](https://github.com/modelcontextprotocol/rust-sdk)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Embedded Debugger MCP is a Rust server for embedded debugging through
-probe-rs. It exposes MCP tools for AI assistants and also includes a small CLI
-and bundled skill for users who want a command-driven workflow without setting
-up an MCP client first.
+Embedded Debugger MCP is a Rust server for embedded debugging through either
+probe-rs (native) or OpenOCD (via the GDB Remote Serial Protocol). It exposes a
+single MCP tool set for AI assistants — probe discovery, target control, memory,
+breakpoints, flash, RTT, and AI-facing crash diagnosis — plus a small CLI and
+bundled skill for a command-driven workflow without setting up an MCP client
+first.
 
 Language versions: [English](README.md) | [中文](README_zh.md)
 
 ## What It Provides
 
+- One MCP tool set over two interchangeable backends (probe-rs native, or
+  OpenOCD via GDB RSP), chosen at connect. Validated on real ESP32-S3.
 - MCP tools for probe discovery, target connection, core control, memory access,
-  breakpoints, flash programming, and RTT communication.
+  breakpoints, flash programming, RTT communication, and crash diagnosis
+  (`diagnose_fault`, `unwind_exception`).
 - CLI commands for environment checks, configuration inspection, probe listing,
   MCP serving, and skill prompt handoff.
 - A Codex/Claude Code compatible skill at `skills/embedded-debugger`.
@@ -27,17 +32,22 @@ Language versions: [English](README.md) | [中文](README_zh.md)
 MCP client or CLI
         |
         v
-embedded-debugger-mcp
+embedded-debugger-mcp  (one MCP tool set)
         |
         v
-probe-rs -> debug probe -> target MCU
+DebugBackend:  probe-rs (native)  |  OpenOCD (GDB RSP)
+        |
+        v
+debug probe / openocd  ->  target MCU
 ```
 
 ## Requirements
 
 - Rust stable toolchain.
 - A probe-rs compatible debug probe such as ST-Link, J-Link, DAPLink, Black
-  Magic Probe, or a supported FTDI-based probe.
+  Magic Probe, or a supported FTDI-based probe. Alternatively, a running
+  `openocd` exposing its GDB port (e.g. openocd-esp32 for ESP32) to use the
+  `openocd` backend.
 - A supported target chip and working SWD/JTAG wiring for hardware operations.
 - Nightly Rust plus `rust-src` for the bundled STM32 demo firmware check.
 
@@ -154,6 +164,24 @@ The first command validates the repository skill metadata, the second validates
 the standard `SKILL.md` layout when the Codex skill creator validator is
 installed, and the third validates the Claude Code plugin manifest.
 
+## Backends
+
+The tools run over one of two interchangeable engines, selected at `connect`:
+
+- `backend: "probe-rs"` (default) — native probe-rs; full flash and RTT support.
+- `backend: "openocd"` (experimental) — connects to an already-running `openocd`
+  over its GDB port (`openocd_address`, default `127.0.0.1:3333`) using the GDB
+  Remote Serial Protocol. Intended for targets probe-rs does not cover (e.g.
+  Xtensa ESP32 via openocd-esp32). Memory access and halt/run/step/reset are
+  validated on real ESP32-S3; flash and RTT are probe-rs only. Register reads
+  currently use ARM gdb register numbers, so PC/SP are wrong on Xtensa (known
+  limitation); `diagnose_fault` and `unwind_exception` are Cortex-M specific.
+  Start openocd with `gdb_memory_map disable`, otherwise it probes flash on the
+  GDB connect, fails, and rejects the connection — e.g.
+  `openocd -f board/esp32s3-builtin.cfg -c "gdb_memory_map disable"`.
+
+The AI sees the same tool set for both; only `connect` arguments change.
+
 ## MCP Tool Set
 
 Probe management:
@@ -184,6 +212,13 @@ Memory and breakpoints:
 | `set_breakpoint` | Set a hardware breakpoint. |
 | `clear_breakpoint` | Clear a hardware breakpoint. |
 
+Diagnostics:
+
+| Tool | Purpose |
+|------|---------|
+| `diagnose_fault` | Read the Cortex-M SCB fault registers (CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID) plus PC/SP/LR in one call and return a compact structured evidence bundle with the set fault bits. Reports raw evidence; it does not assert a root cause. Halt the target first. |
+| `unwind_exception` | Unwind the stack after a crash and map each frame to a source line. On the probe-rs backend, returns a full DWARF backtrace (function + file:line per frame) via probe-rs's own unwinder; on the OpenOCD backend, reads the Cortex-M exception stack frame and maps the faulting PC / caller LR to source lines. Needs `elf_path` to firmware built with debug info (`.debug_line`). |
+
 Flash:
 
 | Tool | Purpose |
@@ -202,6 +237,23 @@ RTT:
 | `rtt_channels` | List discovered RTT channels. |
 | `rtt_read` | Read from an up channel with max byte and timeout limits. |
 | `rtt_write` | Write to a down channel. |
+
+## Crash Diagnosis
+
+After a crash, halt the core and let the model reason over the evidence:
+
+1. `halt`, then `diagnose_fault` — reads the Cortex-M SCB fault registers
+   (CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID) plus PC/SP/LR in one call and returns a
+   compact structured bundle with the set fault bits. It reports evidence; it
+   does not assert a root cause.
+2. `unwind_exception` with `elf_path` — maps the crash to source lines. On the
+   probe-rs backend this is a full DWARF backtrace (function + `file:line` per
+   frame); on the OpenOCD backend it reads the exception stack frame and maps
+   the faulting PC / caller LR.
+
+Both are Cortex-M specific (SCB registers, ARM exception frame) and do not apply
+to Xtensa (ESP32) targets. The firmware must be built with debug info
+(`.debug_line`) for source mapping.
 
 ## Safety Notes
 

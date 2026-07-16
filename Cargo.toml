@@ -1,13 +1,13 @@
 [package]
 name = "embedded-debugger-mcp"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["adancurusul <adancurusul@gmail.com>"]
-description = "A Model Context Protocol server for embedded debugging with probe-rs - supports ARM Cortex-M, RISC-V debugging via J-Link, ST-Link, and more"
+description = "A Model Context Protocol server for embedded debugging via probe-rs or OpenOCD - ARM Cortex-M, RISC-V, and Xtensa (ESP32), with memory/flash/RTT and AI crash diagnosis"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/adancurusul/embedded-debugger-mcp"
-keywords = ["mcp", "debugging", "embedded", "probe-rs", "rtt"]
+keywords = ["mcp", "debugging", "embedded", "probe-rs", "openocd"]
 categories = ["development-tools", "embedded"]
 
 [dependencies]

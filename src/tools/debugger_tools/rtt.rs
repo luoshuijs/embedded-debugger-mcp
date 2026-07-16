@@ -68,7 +68,7 @@ impl EmbeddedDebuggerToolHandler {
             let mut rtt_manager = session_arc.rtt_manager.lock().await;
             match rtt_manager
                 .attach(
-                    session_arc.session.clone(),
+                    session_arc.probe_session()?,
                     control_block_address,
                     memory_ranges,
                 )

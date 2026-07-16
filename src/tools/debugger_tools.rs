@@ -2,6 +2,7 @@
 //!
 //! The tool router is split by domain while keeping one exported handler type for RMCP.
 
+mod diagnostics;
 mod flash;
 mod formatting;
 mod guards;

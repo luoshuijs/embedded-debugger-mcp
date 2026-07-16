@@ -4,6 +4,7 @@
 //! Provides AI assistants with debugging and flash programming tools for
 //! embedded systems including ARM Cortex-M, RISC-V, J-Link, DAPLink, ST-Link, and other debug probes.
 
+pub mod backend;
 pub mod config;
 pub mod debugger;
 pub mod error;

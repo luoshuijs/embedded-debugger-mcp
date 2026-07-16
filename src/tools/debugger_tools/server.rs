@@ -13,7 +13,7 @@ impl ServerHandler for EmbeddedDebuggerToolHandler {
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
-            instructions: Some("Embedded debugging and flash programming MCP server for ARM Cortex-M, RISC-V, and other probe-rs-supported targets. Exposes 22 tools for probe detection, target sessions, memory operations, breakpoints, RTT communication, and flash programming: list_probes, connect, disconnect, probe_info, halt, run, reset, step, get_status, read_memory, write_memory, set_breakpoint, clear_breakpoint, rtt_attach, rtt_detach, rtt_read, rtt_write, rtt_channels, flash_erase, flash_program, flash_verify, run_firmware.".to_string()),
+            instructions: Some("Embedded debugging and flash programming MCP server for ARM Cortex-M, RISC-V, and other targets. A single tool set runs over two interchangeable backends chosen at connect: probe-rs (default, native, RTT/flash) or OpenOCD (backend=\"openocd\", via GDB RSP, for chips probe-rs does not cover). Exposes 24 tools: list_probes, connect, disconnect, probe_info, halt, run, reset, step, get_status, read_memory, write_memory, set_breakpoint, clear_breakpoint, diagnose_fault, unwind_exception, rtt_attach, rtt_detach, rtt_read, rtt_write, rtt_channels, flash_erase, flash_program, flash_verify, run_firmware.".to_string()),
         }
     }
 
@@ -22,7 +22,7 @@ impl ServerHandler for EmbeddedDebuggerToolHandler {
         _request: InitializeRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        info!("Embedded Debugger MCP server initialized with 22 tools (18 debug + 4 flash)");
+        info!("Embedded Debugger MCP server initialized with 24 tools (dual backend: probe-rs + OpenOCD)");
         Ok(self.get_info())
     }
 }
