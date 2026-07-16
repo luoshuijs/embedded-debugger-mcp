@@ -1,6 +1,6 @@
 [package]
 name = "embedded-debugger-mcp"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["adancurusul <adancurusul@gmail.com>"]
 description = "A Model Context Protocol server for embedded debugging with probe-rs - supports ARM Cortex-M, RISC-V debugging via J-Link, ST-Link, and more"
