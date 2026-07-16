@@ -149,6 +149,18 @@ embedded-debugger-mcp skill install --target both --home /tmp/embedded-debugger-
 第一个命令验证仓库内 skill 元数据，第二个命令在已安装 Codex skill creator
 validator 时验证标准 `SKILL.md` 布局，第三个命令验证 Claude Code 插件 manifest。
 
+## 后端
+
+同一套工具运行在两个可互换的引擎之上，在 `connect` 时选择：
+
+- `backend: "probe-rs"`（默认）——原生 probe-rs，完整支持 flash 与 RTT。
+- `backend: "openocd"`（实验性）——通过 GDB Remote Serial Protocol 连接一个已运行
+  的 `openocd`（`openocd_address`，默认 `127.0.0.1:3333`），用于 probe-rs 覆盖不佳的
+  芯片。核心/内存/控制/断点与 `diagnose_fault` 可用；flash 与 RTT 暂仅 probe-rs 支持。
+  该后端尚未经过真实硬件验证。
+
+对 AI 而言两者是同一套工具，只有 `connect` 参数不同。
+
 ## MCP 工具集
 
 探针管理:
@@ -178,6 +190,12 @@ validator 时验证标准 `SKILL.md` 布局，第三个命令验证 Claude Code 
 | `write_memory` | 在配置允许时写入目标内存。 |
 | `set_breakpoint` | 设置硬件断点。 |
 | `clear_breakpoint` | 清除硬件断点。 |
+
+诊断:
+
+| 工具 | 用途 |
+|------|------|
+| `diagnose_fault` | 一次调用读取 Cortex-M SCB 故障寄存器（CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID）及 PC/SP/LR，返回含已置位故障标志的紧凑结构化证据。只给原始证据、不下根因结论。请先 halt 目标。 |
 
 Flash:
 

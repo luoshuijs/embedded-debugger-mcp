@@ -35,18 +35,35 @@ embedded-debugger-mcp doctor --json
 embedded-debugger-mcp probes list --json
 ```
 
+## Backends
+
+One tool set runs over two interchangeable engines, chosen at `connect`:
+
+- `backend: "probe-rs"` (default) — native probe-rs; supports flash and RTT.
+- `backend: "openocd"` (experimental) — talks to an already-running `openocd`
+  over its GDB port via `openocd_address` (default `127.0.0.1:3333`). Use for
+  chips probe-rs does not cover well. Core/memory/control and `diagnose_fault`
+  work here; flash and RTT are not yet available on this backend. Not yet
+  hardware-validated — verify results before trusting them.
+
+The AI uses the same tools regardless of backend; only `connect` differs.
+
 ## MCP Workflow
 
 Use MCP tools for session-based operations:
 
 1. `list_probes`
-2. `connect`
+2. `connect` (add `backend: "openocd"` and `openocd_address` to use OpenOCD)
 3. Read-only checks such as `probe_info`, `get_status`, and `read_memory`
-4. Mutating operations only after the user confirms target, file path, and risk:
-   `write_memory`, `flash_erase`, `flash_program`, `run_firmware`
-5. RTT operations after firmware is running: `rtt_attach`, `rtt_channels`,
-   `rtt_read`, `rtt_write`, `rtt_detach`
-6. `disconnect`
+4. On a crash or halt, call `diagnose_fault`: it reads the Cortex-M SCB fault
+   registers (CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID) plus PC/SP/LR and returns a
+   compact structured evidence bundle in one call. Halt the target first for
+   meaningful values; reason over the set fault bits yourself.
+5. Mutating operations only after the user confirms target, file path, and risk:
+   `write_memory`, `flash_erase`, `flash_program`, `run_firmware` (probe-rs)
+6. RTT operations after firmware is running: `rtt_attach`, `rtt_channels`,
+   `rtt_read`, `rtt_write`, `rtt_detach` (probe-rs)
+7. `disconnect`
 
 ## Safety Rules
 

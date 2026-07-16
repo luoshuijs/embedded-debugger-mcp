@@ -154,6 +154,19 @@ The first command validates the repository skill metadata, the second validates
 the standard `SKILL.md` layout when the Codex skill creator validator is
 installed, and the third validates the Claude Code plugin manifest.
 
+## Backends
+
+The tools run over one of two interchangeable engines, selected at `connect`:
+
+- `backend: "probe-rs"` (default) — native probe-rs; full flash and RTT support.
+- `backend: "openocd"` (experimental) — connects to an already-running `openocd`
+  over its GDB port (`openocd_address`, default `127.0.0.1:3333`) using the GDB
+  Remote Serial Protocol. Intended for targets probe-rs does not cover. Core,
+  memory, control, breakpoints, and `diagnose_fault` are available; flash and RTT
+  are probe-rs only for now. This backend is not yet hardware-validated.
+
+The AI sees the same tool set for both; only `connect` arguments change.
+
 ## MCP Tool Set
 
 Probe management:
@@ -183,6 +196,12 @@ Memory and breakpoints:
 | `write_memory` | Write target memory when enabled by configuration. |
 | `set_breakpoint` | Set a hardware breakpoint. |
 | `clear_breakpoint` | Clear a hardware breakpoint. |
+
+Diagnostics:
+
+| Tool | Purpose |
+|------|---------|
+| `diagnose_fault` | Read the Cortex-M SCB fault registers (CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID) plus PC/SP/LR in one call and return a compact structured evidence bundle with the set fault bits. Reports raw evidence; it does not assert a root cause. Halt the target first. |
 
 Flash:
 
