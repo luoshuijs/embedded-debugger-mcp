@@ -73,6 +73,43 @@ Use MCP tools for session-based operations:
    `rtt_read`, `rtt_write`, `rtt_detach` (probe-rs)
 7. `disconnect`
 
+## Fetch authoritative info yourself
+
+You are a capable model: prefer fetching ground truth over relying on memorized
+or hardcoded chip data. This skill points you to sources; it does not embed
+register tables. In order of authority:
+
+1. The target itself (runtime, most authoritative for this exact chip):
+   registers are self-described by the GDB target description; memory is read
+   with `read_memory`; core identity from CPUID / the connected target.
+2. The firmware ELF (what is actually running): symbols and source lines come
+   from DWARF — use `unwind_exception` (pass `elf_path`) to map addresses to
+   `file:line`.
+3. The chip datasheet / reference manual (external, per-chip): for a peripheral
+   or fault register, find the peripheral's base in the memory-map chapter, add
+   the register offset, then `read_memory`. Search the vendor document for the
+   exact value; do not guess addresses from memory. CMSIS-SVD files are a
+   machine-readable source for register maps.
+4. ARM Cortex-M architecture registers (SCB fault regs, CPUID) are fixed by the
+   ARM architecture and identical across vendors — `diagnose_fault` reads them.
+   They do not exist on non-Cortex-M targets (e.g. Xtensa ESP32).
+
+Do not hardcode or invent register/peripheral addresses. If a value is not
+recoverable from the target, the ELF, or a cited datasheet, say so.
+
+## Know your versions
+
+Behavior and target support depend on tool versions — check them before
+concluding something is unsupported or broken:
+
+- probe-rs version determines which chips and architectures are supported
+  (e.g. Xtensa support is comparatively new). Check `embedded-debugger-mcp doctor`.
+- OpenOCD version and fork matter: the Espressif fork (openocd-esp32) is needed
+  for Xtensa ESP32, and some targets need flags like `gdb_memory_map disable`.
+  Check `openocd --version`.
+- Probe firmware (ST-Link / J-Link) can affect connectivity; `probes list`
+  reports the connected probe.
+
 ## Safety Rules
 
 - Treat flash erase, flash program, memory write, reset, run, and RTT write as
