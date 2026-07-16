@@ -225,8 +225,9 @@ mod tests {
             sock.write_all(b"+").await.unwrap();
 
             // Build the response packet(s). "OK" acks writes, monitor commands,
-            // and breakpoints. `monitor reg pc` replies with the openocd-style
-            // register line as an O-output packet, then OK.
+            // and breakpoints. `monitor reg pc` replies (like real openocd) with
+            // the register line as a single hex-encoded packet (no O prefix, no
+            // trailing OK).
             let responses: Vec<String> = if pkt.starts_with('m') {
                 vec!["deadbeef".to_string()] // 4 bytes for a read
             } else if pkt == "?" {
@@ -235,10 +236,7 @@ mod tests {
                 let cmd = String::from_utf8(hex_decode(hexcmd)).unwrap_or_default();
                 if cmd == "reg pc" {
                     let line = "pc (/32): 0x08000100\n";
-                    vec![
-                        format!("O{}", hex_encode(line.as_bytes())),
-                        "OK".to_string(),
-                    ]
+                    vec![hex_encode(line.as_bytes())]
                 } else {
                     vec!["OK".to_string()]
                 }

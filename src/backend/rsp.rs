@@ -148,7 +148,13 @@ impl RspClient {
                     cmd, pkt
                 )));
             }
-            out.push_str(&pkt);
+            // openocd returns qRcmd command output as a single hex-encoded
+            // packet (no 'O' prefix and no trailing OK). Decode it if it is hex.
+            if let Ok(bytes) = decode_hex(&pkt) {
+                out.push_str(&String::from_utf8_lossy(&bytes));
+            } else {
+                out.push_str(&pkt);
+            }
             break;
         }
         Ok(out)
