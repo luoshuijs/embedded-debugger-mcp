@@ -30,20 +30,29 @@ impl OpenOcdBackend {
     }
 }
 
-/// gdb register numbers for the ARM core profile (stable subset).
+/// Candidate openocd register names for a role, across architectures.
 ///
-/// TODO(xtensa): these are ARM gdb register numbers. On Xtensa targets
-/// (ESP32/-S2/-S3 via openocd-esp32) they do not map to PC/SP/LR — verified on
-/// real ESP32-S3 where `core_reg` returns 0. Add a per-architecture register
-/// map (or query the target's register layout) for real Xtensa/RISC-V support.
-/// Memory access (`m`/`M`) and monitor control are architecture-neutral and
-/// work today.
-fn reg_number(reg: CoreRegId) -> u32 {
+/// openocd resolves register names per target (ARM: pc/sp/lr; Xtensa: pc/a1/a0;
+/// RISC-V: pc/sp/ra), so we ask by NAME via `monitor reg <name>` rather than
+/// guessing a gdb register number. `p<n>` is architecture-specific and, on the
+/// esp32-s3 Xtensa target, the GDB target description exposes no register map
+/// at all — but `monitor reg pc` returns the correct value. Verified on real S3.
+fn role_register_names(reg: CoreRegId) -> &'static [&'static str] {
     match reg {
-        CoreRegId::Sp => 13,
-        CoreRegId::Lr => 14,
-        CoreRegId::Pc => 15,
+        CoreRegId::Pc => &["pc"],
+        CoreRegId::Sp => &["sp", "a1"],
+        CoreRegId::Lr => &["lr", "ra", "a0"],
     }
+}
+
+/// Parse a value out of openocd's `reg` output, e.g. "pc (/32): 0x40381796".
+fn parse_reg_value(text: &str) -> Option<u32> {
+    let idx = text.find("0x")?;
+    let hex: String = text[idx + 2..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    u64::from_str_radix(&hex, 16).ok().map(|v| v as u32)
 }
 
 fn expect_ok(reply: &str, what: &str) -> Result<()> {
@@ -115,21 +124,21 @@ impl DebugBackend for OpenOcdBackend {
     }
 
     async fn core_reg(&mut self, reg: CoreRegId) -> Result<u32> {
-        let reply = self.rsp.command(&format!("p{:x}", reg_number(reg))).await?;
-        if let Some(code) = reply.strip_prefix('E') {
-            return Err(DebugError::InternalError(format!(
-                "OpenOCD read reg error E{}",
-                code
-            )));
+        // Ask openocd for the register by name; it resolves names per target
+        // architecture, so this works without hardcoding gdb register numbers.
+        // Output looks like "pc (/32): 0x40381796".
+        for name in role_register_names(reg) {
+            if let Ok(out) = self.rsp.monitor(&format!("reg {}", name)).await {
+                if let Some(value) = parse_reg_value(&out) {
+                    return Ok(value);
+                }
+            }
         }
-        let bytes = decode_hex(&reply)?;
-        if bytes.len() < 4 {
-            return Err(DebugError::InternalError(format!(
-                "OpenOCD register reply too short: {:?}",
-                reply
-            )));
-        }
-        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        Err(DebugError::InternalError(format!(
+            "could not read register {:?} via 'monitor reg' (tried {:?})",
+            reg,
+            role_register_names(reg)
+        )))
     }
 
     async fn status(&mut self) -> Result<CoreState> {
@@ -161,6 +170,17 @@ mod tests {
 
     fn checksum(bytes: &[u8]) -> u8 {
         bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b))
+    }
+
+    fn hex_encode(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect()
+    }
+
+    fn hex_decode(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+            .collect()
     }
 
     /// Read one RSP packet payload from a socket ($payload#cc). None on EOF.
@@ -204,32 +224,36 @@ mod tests {
             // Ack the client's packet.
             sock.write_all(b"+").await.unwrap();
 
-            // "OK" acknowledges memory writes, monitor (qRcmd) commands, and
-            // breakpoint set/clear; the others return specific payloads.
-            let resp: &str = if pkt.starts_with('m') {
-                "deadbeef" // 4 bytes for a read
-            } else if pkt == "pf" {
-                "00010008" // PC = 0x08000100, little-endian
-            } else if pkt.starts_with('p') {
-                "00000000"
+            // Build the response packet(s). "OK" acks writes, monitor commands,
+            // and breakpoints. `monitor reg pc` replies with the openocd-style
+            // register line as an O-output packet, then OK.
+            let responses: Vec<String> = if pkt.starts_with('m') {
+                vec!["deadbeef".to_string()] // 4 bytes for a read
             } else if pkt == "?" {
-                "T05" // halted
-            } else if pkt.starts_with('M')
-                || pkt.starts_with("qRcmd")
-                || pkt.starts_with('Z')
-                || pkt.starts_with('z')
-            {
-                "OK"
+                vec!["T05".to_string()] // halted
+            } else if let Some(hexcmd) = pkt.strip_prefix("qRcmd,") {
+                let cmd = String::from_utf8(hex_decode(hexcmd)).unwrap_or_default();
+                if cmd == "reg pc" {
+                    let line = "pc (/32): 0x08000100\n";
+                    vec![
+                        format!("O{}", hex_encode(line.as_bytes())),
+                        "OK".to_string(),
+                    ]
+                } else {
+                    vec!["OK".to_string()]
+                }
+            } else if pkt.starts_with('M') || pkt.starts_with('Z') || pkt.starts_with('z') {
+                vec!["OK".to_string()]
             } else {
-                ""
+                vec![String::new()]
             };
 
-            send_packet(&mut sock, resp).await;
-
-            // Read the client's ack for our response.
-            let mut ack = [0u8; 1];
-            if sock.read_exact(&mut ack).await.is_err() {
-                break;
+            for r in &responses {
+                send_packet(&mut sock, r).await;
+                let mut ack = [0u8; 1];
+                if sock.read_exact(&mut ack).await.is_err() {
+                    return;
+                }
             }
         }
     }
@@ -276,5 +300,13 @@ mod tests {
 
         drop(backend);
         let _ = server.await;
+    }
+
+    #[test]
+    fn parses_openocd_reg_output() {
+        // Real formats observed from openocd-esp32 on a live ESP32-S3.
+        assert_eq!(parse_reg_value("pc (/32): 0x40381796\n"), Some(0x4038_1796));
+        assert_eq!(parse_reg_value("a1 (/32): 0x3fcc67d0"), Some(0x3fcc_67d0));
+        assert_eq!(parse_reg_value("no hex here"), None);
     }
 }
