@@ -58,7 +58,9 @@ Use MCP tools for session-based operations:
 4. On a crash or halt, call `diagnose_fault`: it reads the Cortex-M SCB fault
    registers (CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID) plus PC/SP/LR and returns a
    compact structured evidence bundle in one call. Halt the target first for
-   meaningful values; reason over the set fault bits yourself.
+   meaningful values; reason over the set fault bits yourself. Then call
+   `unwind_exception` with `elf_path` to map the crash to a source line
+   (full DWARF backtrace on probe-rs; faulting PC/LR on OpenOCD).
 5. Mutating operations only after the user confirms target, file path, and risk:
    `write_memory`, `flash_erase`, `flash_program`, `run_firmware` (probe-rs)
 6. RTT operations after firmware is running: `rtt_attach`, `rtt_channels`,

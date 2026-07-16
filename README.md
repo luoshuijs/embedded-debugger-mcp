@@ -202,6 +202,7 @@ Diagnostics:
 | Tool | Purpose |
 |------|---------|
 | `diagnose_fault` | Read the Cortex-M SCB fault registers (CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID) plus PC/SP/LR in one call and return a compact structured evidence bundle with the set fault bits. Reports raw evidence; it does not assert a root cause. Halt the target first. |
+| `unwind_exception` | Unwind the stack after a crash and map each frame to a source line. On the probe-rs backend, returns a full DWARF backtrace (function + file:line per frame) via probe-rs's own unwinder; on the OpenOCD backend, reads the Cortex-M exception stack frame and maps the faulting PC / caller LR to source lines. Needs `elf_path` to firmware built with debug info (`.debug_line`). |
 
 Flash:
 

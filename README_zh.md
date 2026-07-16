@@ -196,6 +196,7 @@ validator 时验证标准 `SKILL.md` 布局，第三个命令验证 Claude Code 
 | 工具 | 用途 |
 |------|------|
 | `diagnose_fault` | 一次调用读取 Cortex-M SCB 故障寄存器（CFSR/HFSR/MMFAR/BFAR/SHCSR/CPUID）及 PC/SP/LR，返回含已置位故障标志的紧凑结构化证据。只给原始证据、不下根因结论。请先 halt 目标。 |
+| `unwind_exception` | 崩溃后回溯栈并把每帧映射到源码行。probe-rs 后端用 probe-rs 自带回溯器给出完整 DWARF 调用栈（每帧函数名+file:line）；OpenOCD 后端读取 Cortex-M 异常栈帧，把出错 PC/调用者 LR 映射到源码行。需 `elf_path` 指向带调试信息(`.debug_line`)的固件。 |
 
 Flash:
 

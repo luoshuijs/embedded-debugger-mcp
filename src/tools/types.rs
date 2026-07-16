@@ -115,6 +115,15 @@ pub struct DiagnoseFaultArgs {
     pub session_id: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnwindExceptionArgs {
+    /// Session ID
+    pub session_id: String,
+    /// Path to the firmware ELF built with debug info (.debug_line), used to
+    /// map addresses to source file:line.
+    pub elf_path: String,
+}
+
 // =============================================================================
 // Memory Operation Types
 // =============================================================================

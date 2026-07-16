@@ -105,7 +105,7 @@ mod tests {
             .map(|tool| tool.name.as_ref())
             .collect::<std::collections::HashSet<_>>();
 
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
         for expected in [
             "list_probes",
             "connect",
@@ -121,6 +121,7 @@ mod tests {
             "set_breakpoint",
             "clear_breakpoint",
             "diagnose_fault",
+            "unwind_exception",
             "rtt_attach",
             "rtt_detach",
             "rtt_read",

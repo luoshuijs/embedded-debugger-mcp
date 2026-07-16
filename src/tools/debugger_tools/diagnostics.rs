@@ -13,6 +13,8 @@ use tracing::{debug, info};
 use super::session::EmbeddedDebuggerToolHandler;
 use crate::backend::{CoreRegId, DebugBackend};
 use crate::tools::types::*;
+use probe_rs::debug::{DebugInfo, DebugRegisters};
+use probe_rs::exception_handler_for_core;
 
 // ARMv7-M System Control Block fault registers (identical on all Cortex-M).
 // Source: ARMv7-M Architecture Reference Manual, System Control Block.
@@ -67,6 +69,47 @@ fn hex_or_null(v: Option<u32>) -> serde_json::Value {
         Some(x) => serde_json::Value::String(format!("0x{:08X}", x)),
         None => serde_json::Value::Null,
     }
+}
+
+/// Decoded Cortex-M EXC_RETURN (the LR value while halted in an exception
+/// handler). Determines which stack holds the pushed frame and its size.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ExcReturn {
+    in_exception: bool,
+    uses_psp: bool,
+    extended: bool,
+}
+
+fn decode_exc_return(lr: u32) -> ExcReturn {
+    // EXC_RETURN values are 0xFFFFFFxx. Bit 2 (SPSEL): 1 => PSP. Bit 4: 0 =>
+    // extended (FPU) frame.
+    let in_exception = (lr & 0xFFFF_FF00) == 0xFFFF_FF00;
+    ExcReturn {
+        in_exception,
+        uses_psp: in_exception && (lr & 0x4) != 0,
+        extended: in_exception && (lr & 0x10) == 0,
+    }
+}
+
+/// Cortex-M exception stack frame offsets (basic and extended share these for
+/// the core registers; FP registers, if any, follow xPSR).
+const STACKED_LR_OFFSET: u64 = 0x14;
+const STACKED_PC_OFFSET: u64 = 0x18;
+
+/// Build a frame JSON object from an address and its resolved source location.
+fn frame_json(index: usize, addr: u32, role: &str, di: &DebugInfo) -> serde_json::Value {
+    let sl = di.get_source_location(addr as u64);
+    let (file, line) = match &sl {
+        Some(s) => (Some(s.path.to_path().display().to_string()), s.line),
+        None => (None, None),
+    };
+    serde_json::json!({
+        "index": index,
+        "role": role,
+        "pc": format!("0x{:08X}", addr),
+        "file": file,
+        "line": line,
+    })
 }
 
 #[tool_router(router = diagnostics_tool_router, vis = "pub")]
@@ -150,6 +193,152 @@ impl EmbeddedDebuggerToolHandler {
         info!("Diagnose completed for session: {}", args.session_id);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
+
+    #[tool(
+        description = "Unwind the stack after a crash and map each frame to a source line. On the \
+        probe-rs backend this returns a full DWARF backtrace (function + file:line per frame). On \
+        the OpenOCD backend it reads the Cortex-M exception stack frame and maps the faulting PC \
+        and caller LR to source lines. Requires elf_path pointing at firmware built with debug \
+        info (.debug_line). Halt the target in the fault context first."
+    )]
+    async fn unwind_exception(
+        &self,
+        Parameters(args): Parameters<UnwindExceptionArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        debug!("Unwinding stack for session: {}", args.session_id);
+        let session_arc = self.get_session(&args.session_id).await?;
+        let elf = args.elf_path.clone();
+
+        // probe-rs backend: full DWARF backtrace via probe-rs's own unwinder.
+        // Everything after acquiring the lock is synchronous so the !Send
+        // DebugInfo never crosses an await point.
+        if let Some(prs) = session_arc.probe_rs_session.clone() {
+            let frames = {
+                let mut session = prs.lock().await;
+                let mut core = session.core(0).map_err(|e| {
+                    McpError::internal_error(format!("Failed to get core: {}", e), None)
+                })?;
+                let di = DebugInfo::from_file(&elf).map_err(|e| {
+                    McpError::internal_error(
+                        format!("Failed to load debug info from '{}': {}", elf, e),
+                        None,
+                    )
+                })?;
+                let registers = DebugRegisters::from_core(&mut core);
+                let handler = exception_handler_for_core(core.core_type());
+                let instruction_set = core.instruction_set().ok();
+                let stack = di
+                    .unwind(&mut core, registers, handler.as_ref(), instruction_set)
+                    .map_err(|e| {
+                        McpError::internal_error(format!("Stack unwind failed: {}", e), None)
+                    })?;
+                stack
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let pc: u32 = f.pc.try_into().unwrap_or(0);
+                        let (file, line) = match &f.source_location {
+                            Some(s) => (Some(s.path.to_path().display().to_string()), s.line),
+                            None => (None, None),
+                        };
+                        serde_json::json!({
+                            "index": i,
+                            "pc": format!("0x{:08X}", pc),
+                            "function": f.function_name.clone(),
+                            "file": file,
+                            "line": line,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let report = serde_json::json!({
+                "session": args.session_id,
+                "backend": "probe-rs",
+                "elf": elf,
+                "method": "probe-rs DWARF unwind (full backtrace, innermost first)",
+                "frames": frames,
+                "note": "Each frame is mapped to source via DWARF. Needs firmware built with debug info; halt in the fault context for a meaningful trace."
+            });
+            let text = serde_json::to_string_pretty(&report)
+                .unwrap_or_else(|e| format!("{{\"error\":\"serialize failed: {}\"}}", e));
+            info!(
+                "Unwind (probe-rs) completed for session: {}",
+                args.session_id
+            );
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
+        }
+
+        // OpenOCD (no probe-rs Core): Level-1 exception-frame read + mapping.
+        let (cur_pc, cur_sp, lr, backend_kind) = {
+            let mut backend = session_arc.backend.lock().await;
+            let kind = backend.kind().to_string();
+            let pc = backend.core_reg(CoreRegId::Pc).await.ok();
+            let sp = backend.core_reg(CoreRegId::Sp).await.ok();
+            let lr = backend.core_reg(CoreRegId::Lr).await.ok();
+            (pc, sp, lr, kind)
+        };
+
+        let exc = lr.map(decode_exc_return).unwrap_or_default();
+        let mut stacked_pc = None;
+        let mut stacked_lr = None;
+        let note: &str;
+        if exc.in_exception && !exc.uses_psp {
+            if let Some(sp) = cur_sp {
+                let mut backend = session_arc.backend.lock().await;
+                stacked_pc = backend.read_word(sp as u64 + STACKED_PC_OFFSET).await.ok();
+                stacked_lr = backend.read_word(sp as u64 + STACKED_LR_OFFSET).await.ok();
+                note = "Cortex-M exception frame on MSP (bare-metal). Frame role 'faulting-pc' is the crashing instruction.";
+            } else {
+                note = "In an exception but SP is unavailable; showing current PC only.";
+            }
+        } else if exc.in_exception && exc.uses_psp {
+            note = "Faulting frame is on PSP (RTOS/threaded); the OpenOCD backend cannot read PSP here. Use the probe-rs backend for a full backtrace.";
+        } else {
+            note = "Core is not in an exception context (LR is not EXC_RETURN); showing current PC only.";
+        }
+
+        // Synchronous DWARF mapping (DebugInfo is !Send; no await in this block).
+        let frames = {
+            let di = DebugInfo::from_file(&elf).map_err(|e| {
+                McpError::internal_error(
+                    format!("Failed to load debug info from '{}': {}", elf, e),
+                    None,
+                )
+            })?;
+            let mut v = Vec::new();
+            let mut idx = 0;
+            if let Some(p) = stacked_pc {
+                v.push(frame_json(idx, p, "faulting-pc", &di));
+                idx += 1;
+            }
+            if let Some(l) = stacked_lr {
+                v.push(frame_json(idx, l, "caller-lr", &di));
+                idx += 1;
+            }
+            if let Some(p) = cur_pc {
+                v.push(frame_json(idx, p, "current-pc", &di));
+            }
+            v
+        };
+
+        let report = serde_json::json!({
+            "session": args.session_id,
+            "backend": backend_kind,
+            "elf": elf,
+            "method": "cortex-m exception frame (Level 1)",
+            "in_exception": exc.in_exception,
+            "frames": frames,
+            "note": note,
+        });
+        let text = serde_json::to_string_pretty(&report)
+            .unwrap_or_else(|e| format!("{{\"error\":\"serialize failed: {}\"}}", e));
+        info!(
+            "Unwind (level-1) completed for session: {}",
+            args.session_id
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
 }
 
 #[cfg(test)]
@@ -170,5 +359,39 @@ mod tests {
     fn decodes_hfsr_forced() {
         let flags = set_flags(1 << 30, HFSR_BITS);
         assert_eq!(flags, vec!["FORCED".to_string()]);
+    }
+
+    #[test]
+    fn exc_return_thread_msp_basic() {
+        // 0xFFFFFFF9: return to Thread mode, MSP, basic frame.
+        let e = decode_exc_return(0xFFFF_FFF9);
+        assert!(e.in_exception);
+        assert!(!e.uses_psp);
+        assert!(!e.extended);
+    }
+
+    #[test]
+    fn exc_return_thread_psp() {
+        // 0xFFFFFFFD: return to Thread mode, PSP.
+        let e = decode_exc_return(0xFFFF_FFFD);
+        assert!(e.in_exception);
+        assert!(e.uses_psp);
+    }
+
+    #[test]
+    fn exc_return_extended_fpu_frame() {
+        // 0xFFFFFFE1: handler mode, MSP, extended (FPU) frame (bit4 == 0).
+        let e = decode_exc_return(0xFFFF_FFE1);
+        assert!(e.in_exception);
+        assert!(!e.uses_psp);
+        assert!(e.extended);
+    }
+
+    #[test]
+    fn normal_lr_is_not_exception() {
+        // A normal return address is not EXC_RETURN.
+        let e = decode_exc_return(0x0800_1234);
+        assert!(!e.in_exception);
+        assert_eq!(e, ExcReturn::default());
     }
 }
