@@ -117,16 +117,16 @@ impl FlashManager {
         debug!("Programming file: {}", file_path.display());
 
         // Determine format
-        let probe_format = match format {
+        let image_loader: Box<dyn flashing::ImageLoader> = match format {
             FileFormat::Auto => {
                 // Auto-detect based on extension
                 match file_path.extension().and_then(|s| s.to_str()) {
-                    Some("elf") => flashing::Format::Elf(flashing::ElfOptions::default()),
-                    Some("hex") => flashing::Format::Hex,
-                    Some("bin") => flashing::Format::Bin(probe_rs::flashing::BinOptions {
+                    Some("elf") => Box::new(flashing::ElfLoader(flashing::ElfOptions::default())),
+                    Some("hex") => Box::new(flashing::HexLoader),
+                    Some("bin") => Box::new(flashing::BinLoader(flashing::BinOptions {
                         base_address,
                         skip: 0,
-                    }),
+                    })),
                     _ => {
                         return Err(DebugError::FlashOperationFailed(
                             "Cannot auto-detect file format".to_string(),
@@ -134,12 +134,12 @@ impl FlashManager {
                     }
                 }
             }
-            FileFormat::Elf => flashing::Format::Elf(flashing::ElfOptions::default()),
-            FileFormat::Hex => flashing::Format::Hex,
-            FileFormat::Bin => flashing::Format::Bin(probe_rs::flashing::BinOptions {
+            FileFormat::Elf => Box::new(flashing::ElfLoader(flashing::ElfOptions::default())),
+            FileFormat::Hex => Box::new(flashing::HexLoader),
+            FileFormat::Bin => Box::new(flashing::BinLoader(flashing::BinOptions {
                 base_address,
                 skip: 0,
-            }),
+            })),
         };
 
         // Setup download options - use default and override what we need
@@ -147,16 +147,8 @@ impl FlashManager {
         options.verify = verify;
         options.progress = FlashProgress::empty();
 
-        // Set base address for BIN files - this might need to be handled differently
-        if matches!(probe_format, flashing::Format::Bin(_)) {
-            if let Some(addr) = base_address {
-                // Note: probe-rs API may need different approach for base address
-                warn!("Base address specification for BIN files: 0x{:08X} - may require different API usage", addr);
-            }
-        }
-
         // Execute programming
-        flashing::download_file_with_options(session, file_path, probe_format, options)
+        flashing::download_file_with_options(session, file_path, image_loader, options)
             .map_err(|e| DebugError::FlashOperationFailed(format!("Programming failed: {}", e)))?;
 
         let elapsed = start_time.elapsed().as_millis() as u64;

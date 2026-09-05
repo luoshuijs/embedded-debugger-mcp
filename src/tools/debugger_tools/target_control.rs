@@ -1,3 +1,4 @@
+use rmcp::model::ContentBlock as Content;
 use rmcp::{
     handler::server::wrapper::Parameters, model::*, tool, tool_router, ErrorData as McpError,
 };

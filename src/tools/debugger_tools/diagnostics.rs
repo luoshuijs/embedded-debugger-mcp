@@ -6,6 +6,7 @@
 //! tree — the model reasons over the evidence. This saves context (one call
 //! instead of ~6 `read_memory`) without over-teaching.
 
+use rmcp::model::ContentBlock as Content;
 use rmcp::{
     handler::server::wrapper::Parameters, model::*, tool, tool_router, ErrorData as McpError,
 };

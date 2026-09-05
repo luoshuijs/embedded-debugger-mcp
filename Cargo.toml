@@ -12,11 +12,11 @@ categories = ["development-tools", "embedded"]
 
 [dependencies]
 # MCP SDK
-rmcp = { version = "1.5.0", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.2", features = ["server", "macros", "transport-io"] }
 
 # Core debugging library
-probe-rs = "0.31"
-probe-rs-debug = "0.31"
+probe-rs = "0.32"
+probe-rs-debug = "0.32"
 
 # Async runtime
 tokio = { version = "1.41", features = ["full"] }
@@ -42,7 +42,7 @@ toml = "1"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 
 # ELF parsing for RTT symbol detection
 goblin = "0.10"

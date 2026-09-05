@@ -1,3 +1,4 @@
+use rmcp::model::ContentBlock as Content;
 use rmcp::{
     handler::server::wrapper::Parameters, model::*, tool, tool_router, ErrorData as McpError,
 };
@@ -384,36 +385,6 @@ fn format_probe_open_error_message(
     message
 }
 
-#[cfg(test)]
-mod tests {
-    use super::format_probe_open_error_message;
-
-    #[test]
-    fn includes_winusb_guidance_for_jlink_usb_open_errors_on_windows() {
-        let message = format_probe_open_error_message(
-            "J-Link Debug Probe",
-            "opening the USB device failed: install the WinUSB driver with Zadig",
-            true,
-        );
-
-        assert!(message.contains("Underlying Error:"));
-        assert!(message.contains("opening the USB device failed"));
-        assert!(message.contains("Use Zadig to install WinUSB"));
-    }
-
-    #[test]
-    fn keeps_generic_guidance_without_a_winusb_hint() {
-        let message = format_probe_open_error_message(
-            "J-Link Debug Probe",
-            "opening the USB device failed: access denied",
-            true,
-        );
-
-        assert!(message.contains("Check probe drivers installation"));
-        assert!(!message.contains("Use Zadig to install WinUSB"));
-    }
-}
-
 impl EmbeddedDebuggerToolHandler {
     /// Establish a session backed by an already-running OpenOCD over GDB RSP.
     async fn connect_openocd(
@@ -470,5 +441,35 @@ impl EmbeddedDebuggerToolHandler {
 
         info!("Created OpenOCD debug session: {}", session_id);
         Ok(CallToolResult::success(vec![Content::text(message)]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_probe_open_error_message;
+
+    #[test]
+    fn includes_winusb_guidance_for_jlink_usb_open_errors_on_windows() {
+        let message = format_probe_open_error_message(
+            "J-Link Debug Probe",
+            "opening the USB device failed: install the WinUSB driver with Zadig",
+            true,
+        );
+
+        assert!(message.contains("Underlying Error:"));
+        assert!(message.contains("opening the USB device failed"));
+        assert!(message.contains("Use Zadig to install WinUSB"));
+    }
+
+    #[test]
+    fn keeps_generic_guidance_without_a_winusb_hint() {
+        let message = format_probe_open_error_message(
+            "J-Link Debug Probe",
+            "opening the USB device failed: access denied",
+            true,
+        );
+
+        assert!(message.contains("Check probe drivers installation"));
+        assert!(!message.contains("Use Zadig to install WinUSB"));
     }
 }
